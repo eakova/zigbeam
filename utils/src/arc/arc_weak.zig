@@ -1,5 +1,8 @@
 // This code is part of `arc.zig` and comes after the `Arc<T>` definition.
 const Arc = @import("arc.zig").Arc;
+const builtin = @import("builtin");
+const std = @import("std");
+const atomic = std.atomic;
 /// A non-owning, weak reference to an `Arc<T>`.
 ///
 /// An `ArcWeak` pointer allows you to hold a non-owning reference to a value
@@ -64,7 +67,7 @@ pub fn ArcWeak(comptime T: type) type {
                     if (inner.counters.strong_count.load(.acquire) == 0) {
                         // Both strong and weak counts are now zero. We are the last
                         // one out. It is our responsibility to destroy the control block.
-                        inner.allocator.destroy(inner);
+                        Arc(T).destroyInnerBlock(inner);
                     }
                 }
             }
@@ -99,8 +102,8 @@ pub fn ArcWeak(comptime T: type) type {
                         continue;
                     }
                     // Success! We have atomically and safely incremented the strong count.
-                    // We now have a valid strong reference.
-                    return Arc(T){ .storage = .{ .ptr = inner } };
+                    const tagged = Arc(T).InnerTaggedPtr.new(inner, Arc(T).TAG_POINTER) catch unreachable;
+                    return Arc(T){ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
                 }
             }
             // If we're here, either `self.inner` was null or `strong_count` was 0.

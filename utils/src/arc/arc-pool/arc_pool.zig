@@ -20,8 +20,8 @@ const atomic = std.atomic;
 const builtin = @import("builtin");
 
 // Assuming these are in separate, correctly named files
-const Arc = @import("arc.zig").Arc;
-const ThreadLocalCache = @import("../thread-local-cache/thread_local_cache.zig").ThreadLocalCache;
+const Arc = @import("arc_core").Arc;
+const ThreadLocalCache = @import("thread_local_cache").ThreadLocalCache;
 
 /// A high-performance, thread-safe memory pool for `Arc<T>` allocations.
 pub fn ArcPool(comptime T: type) type {
@@ -92,7 +92,7 @@ pub fn ArcPool(comptime T: type) type {
             var current = self.freelist.swap(null, .acquire);
             while (current) |node| {
                 const next = node.next_in_freelist;
-                self.allocator.destroy(node);
+                Arc(T).destroyInnerBlock(node);
                 current = next;
             }
         }
@@ -109,7 +109,8 @@ pub fn ArcPool(comptime T: type) type {
             if (tls_cache.pop()) |node| {
                 _ = self.stats_tls_hits.fetchAdd(1, .monotonic);
                 node.* = .{ .counters = .{ .strong_count = .init(1), .weak_count = .init(0) }, .data = value, .allocator = self.allocator, .next_in_freelist = null };
-                return Arc(T){ .storage = .{ .tagged_ptr = try Arc(T).SvoPtr.new(node, Arc(T).TAG_POINTER) } };
+                const tagged = Arc(T).InnerTaggedPtr.new(node, Arc(T).TAG_POINTER) catch unreachable;
+                return Arc(T){ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
             }
             _ = self.stats_tls_miss.fetchAdd(1, .monotonic);
 
@@ -125,7 +126,8 @@ pub fn ArcPool(comptime T: type) type {
                 // Successfully popped from global freelist.
                 _ = self.stats_reuses.fetchAdd(1, .monotonic);
                 node.* = .{ .counters = .{ .strong_count = .init(1), .weak_count = .init(0) }, .data = value, .allocator = self.allocator, .next_in_freelist = null };
-                return Arc(T){ .storage = .{ .tagged_ptr = try Arc(T).SvoPtr.new(node, Arc(T).TAG_POINTER) } };
+                const tagged = Arc(T).InnerTaggedPtr.new(node, Arc(T).TAG_POINTER) catch unreachable;
+                return Arc(T){ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
             }
 
             // TIER 3 (SLOWEST): Allocate fresh memory from the system allocator.
@@ -174,5 +176,17 @@ pub fn ArcPool(comptime T: type) type {
         }
 
         // ... (getStats function would be here) ...
+
+        /// Allows the current thread to flush its L1 cache back into the pool.
+        /// Useful for tests to avoid leaking objects when threads exit.
+        pub fn drainThreadCache(self: *Self) void {
+            tls_cache.clear(self);
+        }
+
+        /// Runs `body` with automatic thread-local cache draining.
+        pub fn withThreadCache(self: *Self, body: fn (*Self, *anyopaque) anyerror!void, ctx: *anyopaque) !void {
+            defer self.drainThreadCache();
+            try body(self, ctx);
+        }
     };
 }

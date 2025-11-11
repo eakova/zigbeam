@@ -41,6 +41,17 @@ threadlocal var tls_cache: Cache = .{};
 
 const AtomicUsize = std.atomic.Value(usize);
 
+fn recycleAtomic(ctx: ?*anyopaque, ptr: *Obj) void {
+    _ = ptr;
+    if (ctx) |p| {
+        const counter: *AtomicUsize = @ptrCast(@alignCast(p));
+        _ = counter.fetchAdd(1, .seq_cst);
+    }
+}
+
+const CacheAtomic = cache_mod.ThreadLocalCache(*Obj, recycleAtomic);
+threadlocal var tls_cache_atomic: CacheAtomic = .{};
+
 fn workerThread(ctx: *anyopaque) void {
     const recycled: *AtomicUsize = @ptrCast(@alignCast(ctx));
 
@@ -50,11 +61,11 @@ fn workerThread(ctx: *anyopaque) void {
 
     // Fill per-thread L1 cache; overflow pushes do nothing.
     for (&objs) |*o| {
-        _ = tls_cache.push(o);
+        _ = tls_cache_atomic.push(o);
     }
 
     // Drain per-thread cache to shared counter via callback.
-    tls_cache.clear(recycled);
+    tls_cache_atomic.clear(recycled);
 }
 
 // Scenario: Per-thread isolation and drain via callback
@@ -83,11 +94,11 @@ fn workerOverflow(ctx: *anyopaque) void {
 
     var local_success: usize = 0;
     for (&objs) |*o| {
-        if (tls_cache.push(o)) local_success += 1;
+        if (tls_cache_atomic.push(o)) local_success += 1;
     }
     // Report successes and drain
     _ = success_counter.fetchAdd(local_success, .seq_cst);
-    tls_cache.clear(null);
+    tls_cache_atomic.clear(null);
 }
 
 // Scenario: Overflow under load across threads

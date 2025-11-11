@@ -21,40 +21,51 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 // Assuming `arc.zig` is in the same directory.
-const Arc = @import("arc.zig").Arc;
+const ArcModule = @import("arc_core");
+const Arc = ArcModule.Arc;
 
 /// A mark-and-sweep cycle detector for `Arc<T>`.
 pub fn ArcCycleDetector(comptime T: type) type {
     const InnerType = Arc(T).Inner;
     const ArcPtr = *InnerType;
+    const ArcPtrList = std.ArrayListUnmanaged(ArcPtr);
 
     return struct {
         const Self = @This();
+        pub const ChildList = ArcPtrList;
+        pub const CycleList = struct {
+            allocator: Allocator,
+            list: std.ArrayListUnmanaged(Arc(T)) = .{},
+
+            pub fn deinit(self: *CycleList) void {
+                self.list.deinit(self.allocator);
+            }
+        };
 
         /// A function that can traverse the fields of `T` and report any `Arc<T>`
         /// it contains by appending their inner pointers to the `children` list.
         pub const TraceFn = *const fn (
-            user_context: *anyopaque,
+            user_context: ?*anyopaque,
+            allocator: Allocator,
             data: *const T,
-            children: *std.ArrayList(ArcPtr),
+            children: *ChildList,
         ) void;
 
         allocator: Allocator,
         /// A list of all `Arc::Inner` pointers currently being tracked by the detector.
-        tracked_arcs: std.ArrayList(ArcPtr),
+        tracked_arcs: ArcPtrList = .{},
         /// The user-provided function for traversing the object graph.
         trace_fn: TraceFn,
         /// An optional context pointer to pass to the trace function.
-        trace_context: *anyopaque,
+        trace_context: ?*anyopaque,
 
         /// Initializes a new `CycleDetector`.
         /// - `allocator`: Used for the detector's internal data structures.
         /// - `trace_fn`: The crucial user-provided function to traverse `T`.
         /// - `trace_context`: An optional context pointer for `trace_fn`.
-        pub fn init(allocator: Allocator, trace_fn: TraceFn, trace_context: *anyopaque) Self {
+        pub fn init(allocator: Allocator, trace_fn: TraceFn, trace_context: ?*anyopaque) Self {
             return .{
                 .allocator = allocator,
-                .tracked_arcs = std.ArrayList(ArcPtr).init(allocator),
                 .trace_fn = trace_fn,
                 .trace_context = trace_context,
             };
@@ -62,36 +73,37 @@ pub fn ArcCycleDetector(comptime T: type) type {
 
         /// Deinitializes the detector, freeing its internal lists.
         pub fn deinit(self: *Self) void {
-            self.tracked_arcs.deinit();
+            self.tracked_arcs.deinit(self.allocator);
         }
 
         /// Registers a new `Arc` to be tracked by the detector.
         /// Inline (SVO) `Arc`s cannot be part of a heap-based cycle and are ignored.
         pub fn track(self: *Self, arc: Arc(T)) !void {
+            defer arc.release();
             if (arc.isInline()) {
-                return; // Inline values cannot form heap cycles.
+                return;
             }
             // Avoid adding duplicates. A HashMap would be more efficient for this
             // check, but an ArrayList is simpler for this debug tool.
             for (self.tracked_arcs.items) |tracked| {
                 if (tracked == arc.asPtr()) return;
             }
-            try self.tracked_arcs.append(arc.asPtr());
+            try self.tracked_arcs.append(self.allocator, arc.asPtr());
         }
 
         /// Runs the mark-and-sweep algorithm to find and return a list of `Arc`s
         /// that are part of unreachable reference cycles.
-        pub fn detectCycles(self: *Self) !std.ArrayList(Arc(T)) {
+        pub fn detectCycles(self: *Self) !CycleList {
             // First, remove any arcs that have already been deallocated naturally.
             self.pruneDeadArcs();
 
             // The set of all objects that are reachable from the program's "roots".
-            var reachable = std.HashMap(ArcPtr, void, std.hash_map.PointerContext(ArcPtr), 80).init(self.allocator);
+            var reachable = std.AutoHashMap(ArcPtr, void).init(self.allocator);
             defer reachable.deinit();
 
             // The list of objects to visit.
-            var worklist = std.ArrayList(ArcPtr).init(self.allocator);
-            defer worklist.deinit();
+            var worklist = ArcPtrList{};
+            defer worklist.deinit(self.allocator);
 
             // --- STEP 1: FIND ROOTS ---
             // A "root" is an object that is reachable from outside the graph of tracked objects.
@@ -104,47 +116,46 @@ pub fn ArcCycleDetector(comptime T: type) type {
 
                 // This is a heuristic. A more robust system would require manual root registration.
                 if (strong > weak) {
-                    try worklist.append(arc_ptr);
+                    try worklist.append(self.allocator, arc_ptr);
                 }
             }
 
             // --- STEP 2: MARK PHASE ---
             // Traverse the graph starting from the roots.
-            while (worklist.popOrNull()) |*arc_ptr| {
+            while (worklist.pop()) |arc_ptr| {
                 if (reachable.contains(arc_ptr)) {
                     continue; // Already visited.
                 }
                 try reachable.put(arc_ptr, {});
 
                 // Use the user's trace function to find all children Arcs.
-                var children = std.ArrayList(ArcPtr).init(self.allocator);
-                defer children.deinit();
-                self.trace_fn(self.trace_context, &arc_ptr.data, &children);
+                var children = ArcPtrList{};
+                defer children.deinit(self.allocator);
+                self.trace_fn(self.trace_context, self.allocator, &arc_ptr.data, &children);
 
                 // Add the children to the worklist to be visited.
                 for (children.items) |child_ptr| {
-                    try worklist.append(child_ptr);
+                    try worklist.append(self.allocator, child_ptr);
                 }
             }
 
             // --- STEP 3: SWEEP PHASE ---
             // Find any tracked object that was not marked as reachable.
-            var cycles = std.ArrayList(Arc(T)).init(self.allocator);
-            errdefer cycles.deinit();
+            var cycles = std.ArrayListUnmanaged(Arc(T)){};
+            errdefer cycles.deinit(self.allocator);
 
             for (self.tracked_arcs.items) |arc_ptr| {
                 // An object is part of a leaked cycle if:
                 // 1. It was not reachable from any root.
                 // 2. Its strong count is still greater than zero (kept alive by the cycle).
                 if (!reachable.contains(arc_ptr) and arc_ptr.counters.strong_count.load(.monotonic) > 0) {
-                    // We clone the Arc to return it to the user. This is safe because
-                    // the cycle is keeping it alive.
-                    const arc_clone = Arc(T).clone(&.{ .storage = .{ .tagged_ptr = try Arc(T).SvoPtr.new(arc_ptr, Arc(T).TAG_POINTER) } });
-                    try cycles.append(arc_clone);
+                    const tagged = Arc(T).InnerTaggedPtr.new(arc_ptr, Arc(T).TAG_POINTER) catch unreachable;
+                    const temp = Arc(T){ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
+                    try cycles.append(self.allocator, temp.clone());
                 }
             }
 
-            return cycles;
+            return .{ .allocator = self.allocator, .list = cycles };
         }
 
         /// Internal helper to remove pointers to deallocated `Inner` blocks from the tracking list.

@@ -49,7 +49,7 @@ pub fn TaggedPointer(
 ) type {
     // --- Compile-Time Validation ---
     comptime {
-        if (@typeInfo(PointerType) != .Pointer) {
+        if (@typeInfo(PointerType) != .pointer) {
             @compileError("TaggedPointer can only wrap pointer types.");
         }
         if (num_tag_bits < 1 or num_tag_bits > 3) {
