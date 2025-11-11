@@ -6,6 +6,12 @@
 
 This repository hosts multiple Zig libraries under one roof. Each library can be used on its own or together via a common wrapper. The workspace is designed to be practical: every library ships with small samples, focused tests, and repeatable benchmarks.
 
+
+
+<p><strong><span style="color:#d73a49"># NOTE:</span></strong> This repository is actively evolving and not yet
+production‑ready. APIs and behavior may change without notice until the first tagged
+release is published.</p>
+
 Dependency graph/flow: [utils/docs/dependency_graph.md](utils/docs/dependency_graph.md)
 
 #### Arc
