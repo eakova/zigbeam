@@ -1,3 +1,7 @@
+//! Core `Arc` unit tests.
+//! Each test covers a single promise (inline storage, heap drop, weak upgrade, etc.)
+//! so it is easy to see which behavior fails.
+
 const std = @import("std");
 const testing = std.testing;
 const ArcModule = @import("arc.zig");
@@ -21,6 +25,7 @@ const TrackedValue = struct {
     }
 };
 
+// Inline payload path should support clone/release/tryUnwrap.
 test "Arc inline clone/release/tryUnwrap" {
     var arc = try InlineArcU32.init(testing.allocator, 42);
     try testing.expect(arc.isInline());
@@ -35,6 +40,7 @@ test "Arc inline clone/release/tryUnwrap" {
     try testing.expectEqual(@as(u32, 42), value);
 }
 
+// Heap payload should trigger user-supplied deinit once counts hit zero.
 test "Arc heap deinit runs when last reference drops" {
     var deinit_called = false;
     var arc = try HeapArc.init(testing.allocator, TrackedValue.init(&deinit_called, 99));
@@ -43,6 +49,7 @@ test "Arc heap deinit runs when last reference drops" {
     try testing.expect(deinit_called);
 }
 
+// tryUnwrap must refuse when multiple owners exist.
 test "Arc tryUnwrap enforces uniqueness" {
     var payload = [_]u8{55} ** 32;
     var arc = try HeapArcBytes.init(testing.allocator, payload);
@@ -53,6 +60,7 @@ test "Arc tryUnwrap enforces uniqueness" {
     try testing.expectEqualSlices(u8, payload[0..], value[0..]);
 }
 
+// makeMut should allocate a copy when data is shared.
 test "Arc makeMut clones shared inline data" {
     var arc = try InlineArcU64.init(testing.allocator, 5);
     defer arc.release();
@@ -65,6 +73,7 @@ test "Arc makeMut clones shared inline data" {
     try testing.expectEqual(@as(u64, 5), clone.get().*);
 }
 
+// Weak upgrade path works until the last strong owner releases.
 test "ArcWeak upgrades while strong refs remain" {
     var deinit_called = false;
     var arc = try HeapArc.init(testing.allocator, TrackedValue.init(&deinit_called, 7));

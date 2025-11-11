@@ -1,3 +1,7 @@
+//! Integration-style stress tests for ThreadLocalCache.
+//! Emphasis: multi-thread flows and recycling callbacks so it is clear
+//! how TLS caches feed the global pool.
+
 const std = @import("std");
 const cache_mod = @import("thread_local_cache.zig");
 

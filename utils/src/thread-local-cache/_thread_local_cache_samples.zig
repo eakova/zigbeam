@@ -1,3 +1,7 @@
+//! Minimal example showing how to front a slow global pool with ThreadLocalCache.
+//! The code mimics production patterns (create cache, push/pop, drain back to
+//! the global pool) but stays tiny for readability.
+
 const std = @import("std");
 const cache_mod = @import("thread_local_cache.zig");
 
@@ -51,11 +55,12 @@ pub fn example() !void {
     const n2 = cache.pop().?; // a
     std.debug.assert(n1.value == 2 and n2.value == 1);
 
-    // Return to cache
+    // Return to cache so the next pop is still cheap.
     _ = cache.push(n1);
     _ = cache.push(n2);
 
-    // Drain to global pool on shutdown
+    // Drain to global pool on shutdown. This is what production code would do
+    // when a thread exits or a pool is destroyed.
     cache.clear(&pool);
 
     // Clean up nodes from the global pool in this sample
@@ -66,5 +71,6 @@ pub fn example() !void {
 }
 
 pub fn main() !void {
+    // Reuse the same helper so `zig run` mirrors the documented flow.
     try example();
 }

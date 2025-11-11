@@ -1,3 +1,6 @@
+//! Fuzz-like stress test for ThreadLocalCache push/pop order.
+//! Harness stays tiny so it is easy to adjust.
+
 const std = @import("std");
 const cache_mod = @import("thread_local_cache.zig");
 
@@ -105,4 +108,3 @@ const Context = struct {
 test "fuzz: random op sequences preserve cache invariants" {
     try std.testing.fuzz(Context{}, Context.testOne, .{});
 }
-

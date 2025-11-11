@@ -1,3 +1,7 @@
+//! Unit tests for `TaggedPointer`.
+//! Each test highlights a specific promise (tag bounds, raw round-trips, etc.)
+//! so new contributors can tie behavior back to the implementation quickly.
+
 const std = @import("std");
 const TaggedPointer = @import("tagged_pointer.zig").TaggedPointer;
 
@@ -8,6 +12,7 @@ const TestNode = struct {
 const NodePtr = *TestNode;
 
 test "TaggedPointer basic operations" {
+    // Happy-path: create, mutate pointer/tag, and read them back.
     var node = TestNode{ .value = 42 };
     const ptr: NodePtr = @ptrCast(&node);
     const Pointer = TaggedPointer(NodePtr, 2);
@@ -26,6 +31,7 @@ test "TaggedPointer basic operations" {
 }
 
 test "TaggedPointer rejects oversized tag" {
+    // Defensive check: fail fast when the requested tag does not fit.
     var node = TestNode{ .value = 1 };
     const ptr: NodePtr = @ptrCast(&node);
     const Pointer = TaggedPointer(NodePtr, 1);
@@ -34,6 +40,7 @@ test "TaggedPointer rejects oversized tag" {
 }
 
 test "TaggedPointer preserves pointer bits when toggling tag" {
+    // Ensure repeated tag writes never corrupt the pointer payload.
     var node = TestNode{ .value = 7 };
     const ptr: NodePtr = @ptrCast(&node);
     const Pointer = TaggedPointer(NodePtr, 1);
@@ -45,6 +52,7 @@ test "TaggedPointer preserves pointer bits when toggling tag" {
 }
 
 test "TaggedPointer supports maximum tag space" {
+    // Exercise all possible tag values for a 3-bit configuration.
     const Ptr = TaggedPointer(*align(8) TestNode, 3);
     var nodes: [4]TestNode = undefined;
     var idx: usize = 0;
@@ -63,6 +71,7 @@ test "TaggedPointer supports maximum tag space" {
 }
 
 test "TaggedPointer raw bits roundtrip across multiple nodes" {
+    // Store multiple tagged pointers as raw integers and rebuild them later.
     const Ptr = TaggedPointer(NodePtr, 2);
     var nodes: [3]TestNode = undefined;
     var idx: usize = 0;

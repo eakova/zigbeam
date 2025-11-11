@@ -1,4 +1,8 @@
 //! ARC samples that double as executable documentation.
+//! Each block is grouped by difficulty:
+//! - **Simple:** how to clone/release and observe shared state.
+//! - **Moderate:** weak-reference caches + copy-on-write via `makeMut`.
+//! - **Advanced:** ArcPool with cycle detector plus multi-threaded churn.
 
 const std = @import("std");
 const testing = std.testing;
@@ -22,6 +26,10 @@ const Node = struct {
 // SIMPLE SAMPLE
 // --------------------------------------------------------------------------
 /// Simple usage: create, clone, and observe shared state.
+/// Steps:
+/// 1. Make an `Arc<u32>` with value 10.
+/// 2. Clone it (now two owners see the same data).
+/// 3. Read both values and return their sum.
 pub fn sampleSimpleClone(allocator: std.mem.Allocator) !u32 {
     var arc = try ArcU32.init(allocator, 10);
     defer arc.release();
@@ -40,6 +48,11 @@ test "sample (simple): clone + observe" {
 // MODERATE SAMPLE
 // --------------------------------------------------------------------------
 /// Moderate usage: keep weak references and detect evicted entries.
+/// Steps:
+/// 1. Build two `Arc([]const u8)` strings.
+/// 2. Downgrade each to `ArcWeak`.
+/// 3. Drop the "hello" strong ref but keep "bye".
+/// 4. Upgrading should fail for "hello" and succeed for "bye".
 pub fn sampleModerateWeakCache(allocator: std.mem.Allocator) !bool {
     var hello = try ArcString.init(allocator, "hello");
     var bye = try ArcString.init(allocator, "bye");
@@ -64,6 +77,10 @@ test "sample (moderate): weak cache" {
 }
 
 /// Moderate usage: demonstrate copy-on-write semantics via `makeMut`.
+/// Steps:
+/// 1. Create an inline `[4]u8` payload and clone it.
+/// 2. Call `makeMut` on one owner; it allocates a distinct copy.
+/// 3. Modify the new copy and confirm the old clone is untouched.
 pub fn sampleModerateMakeMut(allocator: std.mem.Allocator) !bool {
     var arc = try ArcBytes.init(allocator, .{ 1, 2, 3, 4 });
     defer arc.release();
@@ -84,6 +101,11 @@ test "sample (moderate): makeMut copy-on-write" {
 // ADVANCED SAMPLE
 // --------------------------------------------------------------------------
 /// Advanced usage: combine `ArcPool` and the cycle detector to find leaks.
+/// Steps:
+/// 1. Allocate two nodes from `ArcPool`.
+/// 2. Wire them into a cycle and track them.
+/// 3. Downgrade references, release strong refs.
+/// 4. Detector should return both nodes.
 pub fn sampleAdvancedPoolAndDetector(allocator: std.mem.Allocator) !usize {
     var pool = Pool.init(allocator);
     defer pool.deinit();
@@ -134,6 +156,10 @@ test "sample (advanced): pooled cycle detection" {
 }
 
 /// Advanced usage: run pooled work inside `withThreadCache` across threads.
+/// Steps:
+/// 1. Spawn several threads that call `ArcPool.create`/`recycle`.
+/// 2. Each worker runs inside `withThreadCache` so TLS caches flush automatically.
+/// 3. Count how many objects flowed through the pool.
 pub fn sampleAdvancedPoolWithThreadCache(allocator: std.mem.Allocator) !usize {
     var pool = CounterPool.init(allocator);
     defer pool.deinit();

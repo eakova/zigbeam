@@ -1,3 +1,6 @@
+//! ThreadLocalCache unit tests.
+//! Each scenario calls out the setup and the expected behavior.
+
 const std = @import("std");
 
 const cache_mod = @import("thread_local_cache.zig");

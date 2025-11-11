@@ -1,3 +1,7 @@
+//! Benchmarks for ThreadLocalCache.
+//! Comments walk through the flow step by step:
+//! 1) warm up, 2) scale iterations, 3) record stats, 4) print + write docs.
+
 const std = @import("std");
 const cache_mod = @import("thread_local_cache.zig");
 
@@ -144,6 +148,7 @@ fn record(stats: *Stats, ops: usize, ns: u64) void {
 
 const Metrics = struct { total_ops: usize, total_ns: u64, ns_per: u64, rate_per_s: u64 };
 
+/// Measure alternating push/pop when the cache never misses.
 fn bench_push_pop_hits(iterations: usize) !Metrics {
     var cache: CacheNoCb = .{};
     var item = Item{ .id = 1 };
@@ -159,6 +164,7 @@ fn bench_push_pop_hits(iterations: usize) !Metrics {
     return .{ .total_ops = iterations, .total_ns = ns, .ns_per = ns_per, .rate_per_s = rate };
 }
 
+/// Measure the "cache full" fast-path (push returns false immediately).
 fn bench_push_overflow(attempts: usize) !Metrics {
     var cache: CacheNoCb = .{};
     var items: [CacheNoCb.capacity]Item = undefined;
@@ -193,6 +199,7 @@ fn bench_pop_miss(iterations: usize) !Metrics {
     return .{ .total_ops = iterations, .total_ns = ns, .ns_per = ns_per, .rate_per_s = rate };
 }
 
+/// Measure `clear(null)` when no recycle callback is installed.
 fn bench_clear_no_callback(cycles: usize, fill_n: usize) !Metrics {
     var cache: CacheNoCb = .{};
     var items: [CacheNoCb.capacity]Item = undefined;
@@ -217,6 +224,7 @@ fn bench_clear_no_callback(cycles: usize, fill_n: usize) !Metrics {
     return .{ .total_ops = items_cleared, .total_ns = ns, .ns_per = ns_per, .rate_per_s = rate };
 }
 
+/// Measure `clear(ctx)` when every item must run the recycle callback.
 fn bench_clear_with_callback(cycles: usize, fill_n: usize) !Metrics {
     var cache: CacheWithCb = .{};
     var items: [CacheWithCb.capacity]Item = undefined;
@@ -260,6 +268,7 @@ fn worker_hits(iterations: usize, start_flag: *AtomicUsize) void {
     }
 }
 
+/// Multi-threaded version of push+pop hits (each thread uses its TLS cache).
 fn bench_mt_push_pop(threads_count: usize, iterations_per_thread: usize) !Metrics {
     var start_flag = AtomicUsize.init(0);
 
@@ -309,6 +318,7 @@ fn worker_fill_and_clear(cycles: usize, start_flag: *AtomicUsize, shared_counter
     }
 }
 
+/// Multi-threaded fill+clear using a shared recycle callback to stress global paths.
 fn bench_mt_fill_and_clear(threads_count: usize, cycles_per_thread: usize) !Metrics {
     var start_flag = AtomicUsize.init(0);
     var shared_counter = AtomicUsize.init(0);

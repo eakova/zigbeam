@@ -290,6 +290,7 @@ pub fn run_single(mt_threads: usize) !void {
 // This is a true test of the library's scalability.
 
 // Context for each worker thread in the multi-threaded benchmark.
+// Holds the shared Arc pointer and the iteration budget for that thread.
 const WorkerContext = struct {
     iterations: u64,
     shared_arc: *const ArcU64,
@@ -312,6 +313,7 @@ fn benchmarkWorker(ctx: *WorkerContext) void {
     }
 }
 
+// Worker used in the ArcPool benchmark: continuously create/recycle nodes.
 fn poolWorker(ctx: *PoolWorkerCtx) void {
     var i: u64 = 0;
     while (i < ctx.iterations) : (i += 1) {
@@ -320,6 +322,7 @@ fn poolWorker(ctx: *PoolWorkerCtx) void {
     }
 }
 
+/// Measure clone/release throughput for a shared Arc across multiple threads.
 fn benchMultiCloneRelease(
     allocator: std.mem.Allocator,
     threads: usize,
@@ -498,6 +501,7 @@ fn benchPoolChurn(pool: *ArcPoolModule.ArcPool([64]u8), value: [64]u8, target_ms
     return .{ .stats = stats, .iterations = run_iters };
 }
 
+/// Spawn `thread_count` workers that hammer `ArcPool.create`/`recycle`.
 fn measurePoolChurnMT(pool: *PoolType, allocator: std.mem.Allocator, thread_count: usize, iterations: u64) !u64 {
     const handles = try allocator.alloc(Thread, thread_count);
     defer allocator.free(handles);
@@ -517,6 +521,7 @@ fn measurePoolChurnMT(pool: *PoolType, allocator: std.mem.Allocator, thread_coun
     return ns;
 }
 
+/// Multi-threaded ArcPool benchmark (uses `measurePoolChurnMT` under the hood).
 fn benchPoolChurnMT(thread_count: usize, target_ms: u64, repeats: usize) !struct { stats: Stats, iterations: u64 } {
     const allocator = getAllocator();
     const pilot_iters: u64 = 20_000;
@@ -584,6 +589,7 @@ pub fn run_downgrade_upgrade() !void {
     try write_md_append(fbs.getWritten());
 }
 
+/// Compare raw heap allocations vs ArcPool reuse (single-threaded).
 pub fn run_pool_churn() !void {
     var pool = ArcPoolModule.ArcPool([64]u8).init(getAllocator());
     defer pool.deinit();
@@ -604,6 +610,7 @@ pub fn run_pool_churn() !void {
     try write_md_append(fbs.getWritten());
 }
 
+/// Measure ArcPool churn when multiple threads share the pool.
 pub fn run_pool_churn_mt(thread_count: usize) !void {
     const result = try benchPoolChurnMT(thread_count, 120, 2);
     const med = medianIqr(result.stats.ns_per_list[0..result.stats.len]);
