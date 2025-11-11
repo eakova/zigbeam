@@ -1,4 +1,4 @@
-# ARC Benchmark Results
+# Arc Benchmark Results
 
 ## Legend
 - Iterations: number of clone+release pairs per measured run.
@@ -50,4 +50,3 @@
 | --- | --- | --- | --- |
 | direct heap | 17,025 | 3,687 | 271,535 |
 | ArcPool recycle | 15,450,618 | 2 | 354,361,577 |
-

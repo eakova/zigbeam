@@ -1,6 +1,6 @@
-## ARC/Pool/Cache Dependency & Interaction Graph
+## Arc/Pool/Cache Dependency & Interaction Graph
 
-This document shows how the ARC family of utilities depend on and interact with each other. It also clarifies a couple of naming details used in the diagram.
+This document shows how the Arc family of utilities depend on and interact with each other. It also clarifies a couple of naming details used in the diagram.
 
 Key corrections
 - Arc<T>.storage is an extern union used for Small Value Optimization (SVO), not a tagged union.
@@ -46,8 +46,8 @@ Key corrections
 |     ThreadLocalCache     |      |          Arc<T>          |     |        ArcWeak<T>        |
 +--------------------------+      +--------------------------+     +--------------------------+
       |                                     |                                |
- (Holds array of                          | (Has)                         | (Holds Inner* or null)
-  *Inner pointers)                         |                                |
+ (Holds array of                            | (Has)                          | (Holds Inner* or null)
+  *Inner pointers)                          |                                |
       |                                     v                                v
       |                              +--------------------------+
       |                              |   storage (extern union) |
@@ -89,7 +89,7 @@ Key corrections
 - SVO is used when `T` is small and plain data (e.g., a few bytes, POD):
   - Arc<T>.storage = inline_data
   - No Inner allocation
-  - No ARC counters involved
+- No Arc counters involved
 - Otherwise, Arc<T> stores Inner*, and the counters (strong/weak) live inside Inner.
 
 ## Where to look in code

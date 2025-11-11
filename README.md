@@ -6,58 +6,68 @@
 
 This repository hosts multiple Zig libraries under one roof. Each library can be used on its own or together via a common wrapper. The workspace is designed to be practical: every library ships with small samples, focused tests, and repeatable benchmarks.
 
-## Requirements
-
-- Zig 0.15.x
-- macOS or Linux (multi-threaded tests/benchmarks rely on std.Thread)
-
-## Libraries
-
-- `utils/` — Foundational utilities
-  - Tagged pointer (bit-packed metadata)
-  - Thread-local cache (lock-free L1 pool)
-  - ARC smart pointer + pool + cycle detector
-  - Build targets: tests, samples, and benchmarks
-- `zig-rcu/` — Reserved for future libraries (or your own)
-
-Each library folder keeps its own `build.zig`, `src/`, and `docs/` (for reports).
-
 Dependency graph/flow: [utils/docs/dependency_graph.md](utils/docs/dependency_graph.md)
 
-#### Tagged Pointer
-- Pack a small tag into a pointer’s low bits (common for lightweight flags)
-- Import: `zig_beam_utils.tagged_pointer`
-- Samples: `zig build samples-tagged`
-- Source: `utils/src/tagged-pointer/tagged_pointer.zig`
-- Bench: —
+#### Arc
+- Atomic smart pointer with Small Value Optimization (SVO) and weak references
+- Import: `zig_beam_utils.arc`
+- Samples: `zig build samples-arc`
+- Source: [utils/src/arc/arc.zig](utils/src/arc/arc.zig)
+- Unit tests: [utils/src/arc/_arc_unit_tests.zig](utils/src/arc/_arc_unit_tests.zig)
+- Integration tests: [utils/src/arc/_arc_integration_tests.zig](utils/src/arc/_arc_integration_tests.zig)
+- Bench: `zig build bench-arc` [utils/docs/arc_benchmark_results.md](utils/docs/arc_benchmark_results.md)
+
+#### Arc Pool
+- Reuse `Arc(T).Inner` allocations; fronted by a ThreadLocalCache and a global Treiber stack
+- Import: `zig_beam_utils.arc_pool`
+- Samples: (covered in Arc samples)
+- Source: [utils/src/arc/arc-pool/arc_pool.zig](utils/src/arc/arc-pool/arc_pool.zig)
+- Unit tests: [utils/src/arc/arc-pool/_arc_pool_unit_tests.zig](utils/src/arc/arc-pool/_arc_pool_unit_tests.zig)
+- Integration tests: [utils/src/arc/arc-pool/_arc_pool_integration_tests.zig](utils/src/arc/arc-pool/_arc_pool_integration_tests.zig)
+- Bench: `zig build bench-arc` [utils/docs/arc_benchmark_results.md](utils/docs/arc_benchmark_results.md)
 
 #### Thread‑Local Cache
 - Per‑thread, lock‑free L1 pool to reduce allocator pressure and contention
 - Import: `zig_beam_utils.thread_local_cache`
 - Samples: `zig build samples-tlc`
-- Source: `utils/src/thread-local-cache/thread_local_cache.zig`
+- Source: [utils/src/thread-local-cache/thread_local_cache.zig](utils/src/thread-local-cache/thread_local_cache.zig)
+- Unit tests: [utils/src/thread-local-cache/_thread_local_cache_unit_tests.zig](utils/src/thread-local-cache/_thread_local_cache_unit_tests.zig)
+- Integration tests: [utils/src/thread-local-cache/_thread_local_cache_integration_test.zig](utils/src/thread-local-cache/_thread_local_cache_integration_test.zig)
 - Bench: `zig build bench-tlc` [utils/docs/thread_local_cache_benchmark_results.md](utils/docs/thread_local_cache_benchmark_results.md)
 
-#### ARC
-- Atomic smart pointer with Small Value Optimization (SVO) and weak references
-- Import: `zig_beam_utils.arc`
-- Samples: `zig build samples-arc`
-- Source: `utils/src/arc/arc.zig`
-- Bench: `zig build bench-arc` [utils/docs/arc_benchmark_results.md](utils/docs/arc_benchmark_results.md)
-
-#### ARC Pool
-- Reuse `Arc<T>::Inner` allocations; fronted by a ThreadLocalCache and a global Treiber stack
-- Import: `zig_beam_utils.arc_pool`
-- Samples: (covered in ARC samples)
-- Source: `utils/src/arc/arc-pool/arc_pool.zig`
-- Bench: `zig build bench-arc` [utils/docs/arc_benchmark_results.md](utils/docs/arc_benchmark_results.md)
+#### Tagged Pointer
+- Pack a small tag into a pointer’s low bits (common for lightweight flags)
+- Import: `zig_beam_utils.tagged_pointer`
+- Samples: `zig build samples-tagged`
+- Source: [utils/src/tagged-pointer/tagged_pointer.zig](utils/src/tagged-pointer/tagged_pointer.zig)
+- Unit tests: [utils/src/tagged-pointer/_tagged_pointer_unit_tests.zig](utils/src/tagged-pointer/_tagged_pointer_unit_tests.zig)
+- Integration tests: [utils/src/tagged-pointer/_tagged_pointer_integration_tests.zig](utils/src/tagged-pointer/_tagged_pointer_integration_tests.zig)
+- Bench: —
 
 #### Cycle Detector
 - Debug utility to find unreachable cycles of Arcs using a user‑provided trace function
 - Import: `zig_beam_utils.arc_cycle_detector`
 - Samples: —
-- Source: `utils/src/arc/cycle-detector/arc_cycle_detector.zig`
+- Source: [utils/src/arc/cycle-detector/arc_cycle_detector.zig](utils/src/arc/cycle-detector/arc_cycle_detector.zig)
+- Unit tests: [utils/src/arc/cycle-detector/_arc_cycle_detector_unit_tests.zig](utils/src/arc/cycle-detector/_arc_cycle_detector_unit_tests.zig)
+- Integration tests: [utils/src/arc/cycle-detector/_arc_cycle_detector_integration_tests.zig](utils/src/arc/cycle-detector/_arc_cycle_detector_integration_tests.zig)
 - Bench: —
+
+## Requirements
+
+- Zig 0.15.x
+- macOS, Linux, or Windows
+
+## Libraries
+
+- `utils/` — Foundational utilities
+  - Arc smart pointer + pool + cycle detector
+  - Thread-local cache (lock-free L1 pool)
+  - Tagged pointer (bit-packed metadata)
+  - Build targets: tests, samples, and benchmarks
+- `zig-rcu/` — Reserved for future libraries (or your own)
+
+Each library folder keeps its own `build.zig`, `src/`, and `docs/` (for reports).
 
 ## Usage
 
@@ -111,7 +121,7 @@ _ = cache.pop();
 cache.clear(null);
 ```
 
-ARC (init/clone/release):
+Arc (init/clone/release):
 ```zig
 const utils = @import("zig_beam_utils");
 const Arc = utils.arc.Arc(u64);
@@ -199,8 +209,8 @@ pub fn main() !void {
 }
 ```
 
-Notes
-- The `zig_beam_utils` wrapper re-exports all public modules so a single import covers tagged pointer, thread-local cache, ARC, pool, and cycle detector.
+## Notes
+- The `zig_beam_utils` wrapper re-exports all public modules so a single import covers Tagged Pointer, Thread-Local Cache, Arc,Arc Pool, and Cycle Detector.
 - If you prefer, you can depend on sub-libraries when they become separate packages; the wrapper is a convenient default today.
 
 ## Library: utils
@@ -234,6 +244,7 @@ See `utils/README.md` for module-level details and commands.
 - Reports include machine info (OS, arch, build mode, pointer width, CPU count)
 - Console prints a short summary with a link to the Markdown report
 - Multi-thread runs are opt-in via an environment variable (e.g., `ARC_BENCH_RUN_MT=1`)
+  and use only standard library threading (`std.Thread`).
 
 ## Compatibility
 
@@ -292,7 +303,18 @@ Good first steps:
 
 ## License
 
-TBD (e.g., MIT/Apache‑2.0 dual license). Some subfolders may add extra notices if required.
+Licensed under either of
+
+* Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+* MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
 
 ## Support
 

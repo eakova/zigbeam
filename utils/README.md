@@ -58,7 +58,7 @@ _ = cache.pop();
 cache.clear(null);
 ```
 
-## ARC Core
+## Arc Core
 Purpose
 - Atomic reference counting, SVO for small data, weak references, and pooling support.
 
@@ -89,7 +89,7 @@ var b = a.clone(); defer b.release();
 // a.get().* == 42, b.get().* == 42
 ```
 
-## ARC Pool
+## Arc Pool
 Multi-layer allocator (TLS cache + Treiber stack + allocator fallback) that
 recycles `Arc.Inner` blocks for heap-backed payloads.
 
@@ -99,7 +99,7 @@ zig test src/arc/arc-pool/_arc_pool_integration_tests.zig
 zig build test-arc-pool
 ```
 
-## ARC Cycle Detector
+## Arc Cycle Detector
 Debug-only tracing utility to surface reference cycles in complex Arc graphs.
 
 ```bash
@@ -137,7 +137,7 @@ $env:ZIG_LOCAL_CACHE_DIR  = "$PWD/.zig-local-cache"
 
 ## Use `utils` In Your Project
 
-Consume the `utils` library via Zig’s package system (recommended). This exposes the wrapper module `zig_beam_utils`, which re‑exports tagged pointer, thread‑local cache, ARC, pool, and cycle detector.
+Consume the `utils` library via Zig’s package system (recommended). This exposes the wrapper module `zig_beam_utils`, which re‑exports tagged pointer, thread‑local cache, Arc, pool, and cycle detector.
 
 1) Add to your `build.zig.zon`
 
