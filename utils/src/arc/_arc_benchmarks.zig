@@ -149,8 +149,14 @@ fn record(stats: *Stats, ops: u64, ns: u64) void {
 // This test measures the raw, best-case performance of `clone` and `release`
 // operations without any cross-thread contention. It establishes the baseline
 // overhead of the reference counting mechanism.
+var global_gpa = std.heap.GeneralPurposeAllocator(.{}){};
+
+fn getAllocator() std.mem.Allocator {
+    return global_gpa.allocator();
+}
+
 fn benchCloneReleaseType(comptime T: type, value: T, target_ms: u64, repeats: usize) !struct { stats: Stats, iterations: u64 } {
-    const allocator = testing.allocator;
+    const allocator = getAllocator();
     const ArcType = ArcModule.Arc(T);
     const pilot_iters: u64 = 100_000;
 
@@ -184,7 +190,7 @@ fn benchCloneReleaseType(comptime T: type, value: T, target_ms: u64, repeats: us
 }
 
 pub fn run_single() !void {
-    const allocator = testing.allocator;
+    const allocator = getAllocator();
     // quick-mode params
     const target_ms_st: u64 = 100;
     const warmups: usize = 0;
@@ -359,7 +365,7 @@ pub fn run_multi() !void {
 
 fn benchDowngradeUpgrade(comptime T: type, value: T, target_ms: u64, repeats: usize) !struct { stats: Stats, iterations: u64 } {
     const ArcType = ArcModule.Arc(T);
-    const allocator = testing.allocator;
+    const allocator = getAllocator();
     const pilot_iters: u64 = 50_000;
 
     var arc = try ArcType.init(allocator, value);
@@ -468,7 +474,7 @@ pub fn run_downgrade_upgrade() !void {
 }
 
 pub fn run_pool_churn() !void {
-    var pool = ArcPoolModule.ArcPool([64]u8).init(testing.allocator);
+    var pool = ArcPoolModule.ArcPool([64]u8).init(getAllocator());
     defer pool.deinit();
 
     const result = try benchPoolChurn(&pool, [_]u8{9} ** 64, 60, 2);
