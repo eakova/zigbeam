@@ -1,7 +1,13 @@
-# Zig build system output directories
+# Zig build system output directories (root)
 zig-out/
 zig-cache/
 .zig-cache/
+
+# Zig caches (any depth)
+**/zig-cache/
+**/.zig-cache/
+**/.zig-local-cache/
+**/.zig-global-cache/
 
 # Object files and executables
 *.o
