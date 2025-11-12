@@ -113,7 +113,10 @@ test "Arc downgrade/upgrade remains stable under contention" {
 }
 
 test "Arc newCyclic integrates: self-weak upgrade ok before drop, fails after" {
-    const Node = struct { weak_self: ArcModule.ArcWeak(@This()) = ArcModule.ArcWeak(@This()).empty() };
+    const Node = struct {
+        weak_self: ArcModule.ArcWeak(@This()) = ArcModule.ArcWeak(@This()).empty(),
+        pub fn deinit(self: *@This()) void { self.weak_self.release(); }
+    };
     const ArcNode = ArcModule.Arc(Node);
 
     var arc = try ArcNode.newCyclic(testing.allocator, struct {
@@ -132,7 +135,10 @@ test "Arc newCyclic integrates: self-weak upgrade ok before drop, fails after" {
 }
 
 test "ArcPool createCyclic integrates: pooled self-weak works and recycles" {
-    const Node = struct { weak_self: ArcModule.ArcWeak(@This()) = ArcModule.ArcWeak(@This()).empty() };
+    const Node = struct {
+        weak_self: ArcModule.ArcWeak(@This()) = ArcModule.ArcWeak(@This()).empty(),
+        pub fn deinit(self: *@This()) void { self.weak_self.release(); }
+    };
     const Pooled = ArcPoolModule.ArcPool(Node, false);
     var pool = Pooled.init(testing.allocator, .{});
     defer pool.deinit();

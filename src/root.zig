@@ -15,6 +15,7 @@ pub const Utils = struct {
     pub const TaggedPointer = tagged_pointer.TaggedPointer;
     pub const ThreadLocalCache = thread_local_cache.ThreadLocalCache;
     pub const ThreadLocalCacheWithCapacity = thread_local_cache.ThreadLocalCacheWithCapacity;
+    pub const ThreadLocalCacheWithOptions = thread_local_cache.ThreadLocalCacheWithOptions;
     pub const Arc = arc.Arc;
     pub const ArcWeak = arc.ArcWeak;
     pub const ArcPool = arc_pool.ArcPool;

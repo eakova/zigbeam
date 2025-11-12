@@ -82,6 +82,12 @@ pub fn Arc(comptime T: type) type {
             counters: Counters,
             data: T,
             allocator: Allocator,
+            /// Optional behavior flags for final-drop. If `auto_call_deinit` is true,
+            /// Arc will call `T.deinit` on last-strong-drop when present. If `on_drop`
+            /// is provided, it will be invoked before deinit to allow custom cleanup
+            /// (e.g., releasing self-held weak references in newCyclic patterns).
+            auto_call_deinit: bool = true,
+            on_drop: ?*const fn (*T) void = null,
             next_in_freelist: ?*Inner,
         };
 
@@ -90,6 +96,15 @@ pub fn Arc(comptime T: type) type {
         };
 
         pub const InnerTaggedPtr = TaggedPointer(*Inner, 1);
+
+        /// Options for cyclic construction behavior.
+        pub const CyclicOptions = struct {
+            /// If true (default), call `T.deinit` on last-strong-drop when present.
+            auto_call_deinit: bool = true,
+            /// Optional hook invoked on last-strong-drop before deinit. Useful to
+            /// release self-held weak references created during newCyclic.
+            on_drop: ?*const fn (*T) void = null,
+        };
 
         pub fn destroyInnerBlock(inner: *Inner) void {
             const block_ptr = @as(*InnerBlock, @ptrFromInt(@intFromPtr(inner)));
@@ -140,6 +155,8 @@ pub fn Arc(comptime T: type) type {
                     .counters = .{ .strong_count = .init(1), .weak_count = .init(0) },
                     .data = value,
                     .allocator = allocator,
+                    .auto_call_deinit = true,
+                    .on_drop = null,
                     .next_in_freelist = null,
                 };
                 const tagged = InnerTaggedPtr.new(&block.inner, TAG_POINTER) catch unreachable;
@@ -161,6 +178,8 @@ pub fn Arc(comptime T: type) type {
                 block.inner.counters.strong_count.store(1, .monotonic);
                 block.inner.counters.weak_count.store(0, .monotonic);
                 block.inner.allocator = allocator;
+                block.inner.auto_call_deinit = true;
+                block.inner.on_drop = null;
                 block.inner.next_in_freelist = null;
                 initializer(&block.inner.data);
                 const tagged = InnerTaggedPtr.new(&block.inner, TAG_POINTER) catch unreachable;
@@ -182,6 +201,8 @@ pub fn Arc(comptime T: type) type {
                 block.inner.counters.strong_count.store(1, .monotonic);
                 block.inner.counters.weak_count.store(0, .monotonic);
                 block.inner.allocator = allocator;
+                block.inner.auto_call_deinit = true;
+                block.inner.on_drop = null;
                 block.inner.next_in_freelist = null;
                 if (initializer(&block.inner.data)) |_| {
                     const tagged = InnerTaggedPtr.new(&block.inner, TAG_POINTER) catch unreachable;
@@ -198,13 +219,21 @@ pub fn Arc(comptime T: type) type {
         /// This is analogous to Rust's `Arc::new_cyclic` and is only supported for heap arcs
         /// (SVO devre dışı). The initializer constructs a value given a temporary `ArcWeak(T)`.
         pub fn newCyclic(allocator: Allocator, ctor: *const fn (ArcWeak(T)) anyerror!T) !Self {
+            return newCyclicWithOptions(allocator, ctor, .{});
+        }
+
+        /// Same as `newCyclic` but allows customizing final-drop behavior.
+        pub fn newCyclicWithOptions(allocator: Allocator, ctor: *const fn (ArcWeak(T)) anyerror!T, opts: CyclicOptions) !Self {
             if (comptime use_svo) {
                 @compileError("Arc.newCyclic requires heap allocation; SVO is not supported");
             }
+            const o: CyclicOptions = opts;
             const block = try allocator.create(InnerBlock);
             block.inner.counters.strong_count.store(1, .monotonic);
             block.inner.counters.weak_count.store(1, .monotonic); // hold a temporary weak during init
             block.inner.allocator = allocator;
+            block.inner.auto_call_deinit = o.auto_call_deinit;
+            block.inner.on_drop = o.on_drop;
             block.inner.next_in_freelist = null;
 
             var weak = ArcWeak(T){ .inner = &block.inner };
@@ -223,9 +252,16 @@ pub fn Arc(comptime T: type) type {
 
         /// Non-fallible convenience for `newCyclic`.
         pub fn newCyclicNoError(allocator: Allocator, ctor: *const fn (ArcWeak(T)) T) !Self {
-            return newCyclic(allocator, struct {
+            return newCyclicWithOptions(allocator, struct {
                 fn wrap(w: ArcWeak(T)) anyerror!T { return ctor(w); }
-            }.wrap);
+            }.wrap, .{});
+        }
+
+        /// Non-fallible variant with options.
+        pub fn newCyclicNoErrorWithOptions(allocator: Allocator, ctor: *const fn (ArcWeak(T)) T, opts: CyclicOptions) !Self {
+            return newCyclicWithOptions(allocator, struct {
+                fn wrap(w: ArcWeak(T)) anyerror!T { return ctor(w); }
+            }.wrap, opts);
         }
 
         /// Increase the strong count and return another Arc to the same value.
@@ -249,26 +285,25 @@ pub fn Arc(comptime T: type) type {
             const old_count = inner.counters.strong_count.fetchSub(1, .release);
             if (old_count == 1) {
                 _ = inner.counters.strong_count.load(.acquire);
-                // We use compile-time reflection to determine how to deinitialize the data.
-                const ti = @typeInfo(T);
-                if (comptime ti == .@"struct" or ti == .@"union" or ti == .@"opaque") {
-                    if (comptime @hasDecl(T, "deinit")) {
-                        const DeinitFn = @TypeOf(T.deinit);
-                        const deinit_info = switch (@typeInfo(DeinitFn)) {
-                            .@"fn" => |info| info,
-                            else => @compileError("Arc<T> expected deinit to be a function"),
-                        };
-
-                        if (deinit_info.params.len == 1 and deinit_info.params[0].type.? == *T) {
-                            T.deinit(&inner.data);
-                        } else if (deinit_info.params.len == 2 and
-                            deinit_info.params[0].type.? == *T and
-                            deinit_info.params[1].type.? == Allocator)
-                        {
-                            T.deinit(&inner.data, inner.allocator);
-                        } else {
-                            @compileError("Arc<T> found a .deinit function on type '" ++ @typeName(T) ++
-                                "', but its signature is not supported. Supported signatures are deinit(self: *T) and deinit(self: *T, allocator: Allocator).");
+                // Optional user-provided drop hook (e.g., release self-held weak refs)
+                if (inner.on_drop) |hook| hook(&inner.data);
+                // Deinit on final strong drop (if enabled and present on T)
+                if (inner.auto_call_deinit) {
+                    const ti = @typeInfo(T);
+                    if (comptime ti == .@"struct" or ti == .@"union" or ti == .@"opaque") {
+                        if (comptime @hasDecl(T, "deinit")) {
+                            const DeinitFn = @TypeOf(T.deinit);
+                            const deinit_info = switch (@typeInfo(DeinitFn)) {
+                                .@"fn" => |info| info,
+                                else => @compileError("Arc<T> expected deinit to be a function"),
+                            };
+                            if (deinit_info.params.len == 1 and deinit_info.params[0].type.? == *T) {
+                                T.deinit(&inner.data);
+                            } else if (deinit_info.params.len == 2 and deinit_info.params[0].type.? == *T and deinit_info.params[1].type.? == Allocator) {
+                                T.deinit(&inner.data, inner.allocator);
+                            } else {
+                                @compileError("Arc<T> found a .deinit function on type '" ++ @typeName(T) ++ "', but its signature is not supported. Supported signatures are deinit(self: *T) and deinit(self: *T, allocator: Allocator).");
+                            }
                         }
                     }
                 }

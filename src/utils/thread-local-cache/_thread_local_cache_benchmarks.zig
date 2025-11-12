@@ -5,6 +5,7 @@
 const std = @import("std");
 const beam = @import("zig_beam");
 const cache_mod = beam.Utils;
+const cache_raw = beam.Utils;
 
 // Simple item to cache. We only traffic in pointers to this.
 const Item = struct { id: usize };
@@ -21,6 +22,19 @@ fn recycle_atomic(ctx: ?*anyopaque, _: *Item) void {
 // Cache type aliases
 const CacheNoCb = cache_mod.ThreadLocalCache(*Item, null);
 const CacheWithCb = cache_mod.ThreadLocalCache(*Item, recycle_atomic);
+// Auto/fixed capacity variants for comparative tables
+const CacheAuto = cache_raw.ThreadLocalCacheWithOptions(*Item, null, .{});
+const CacheFix8  = cache_mod.ThreadLocalCacheWithCapacity(*Item, null, 8);
+const CacheFix16 = cache_mod.ThreadLocalCacheWithCapacity(*Item, null, 16);
+const CacheFix32 = cache_mod.ThreadLocalCacheWithCapacity(*Item, null, 32);
+const CacheFix64 = cache_mod.ThreadLocalCacheWithCapacity(*Item, null, 64);
+// Sanitize toggle (same capacity) for push/pop cost
+const CacheSanOn  = cache_raw.ThreadLocalCacheWithOptions(*Item, null, .{ .capacity = 16, .active_capacity = 16, .sanitize_slots = true });
+const CacheSanOff = cache_raw.ThreadLocalCacheWithOptions(*Item, null, .{ .capacity = 16, .active_capacity = 16, .sanitize_slots = false });
+// Active capacity sweep with fixed capacity=64
+const CacheCap64_A32 = cache_raw.ThreadLocalCacheWithOptions(*Item, null, .{ .capacity = 64, .active_capacity = 32 });
+const CacheCap64_A48 = cache_raw.ThreadLocalCacheWithOptions(*Item, null, .{ .capacity = 64, .active_capacity = 48 });
+const CacheCap64_A64 = cache_raw.ThreadLocalCacheWithOptions(*Item, null, .{ .capacity = 64, .active_capacity = 64 });
 
 const MD_PATH = "docs/utils/thread_local_cache_benchmark_results.md";
 
@@ -249,6 +263,40 @@ fn bench_clear_with_callback(cycles: usize, fill_n: usize) !Metrics {
     const total = counter.load(.seq_cst);
     _ = total; // recorded via ops count
     return .{ .total_ops = items_cleared, .total_ns = ns, .ns_per = ns_per, .rate_per_s = rate };
+}
+
+// ---- Generic helpers to reuse existing scenarios for different cache types ----
+
+fn bench_push_pop_hits_generic(comptime CacheType: type, iterations: usize) !Metrics {
+    var cache: CacheType = .{};
+    var item = Item{ .id = 7 };
+    var timer = try std.time.Timer.start();
+    var i: usize = 0;
+    while (i < iterations) : (i += 1) {
+        _ = cache.push(&item);
+        _ = cache.pop();
+    }
+    const ns = timer.read();
+    return .{ .total_ops = iterations, .total_ns = ns, .ns_per = fmt_ns_per(iterations, ns), .rate_per_s = fmt_rate(iterations, ns) };
+}
+
+fn bench_clear_no_callback_generic(comptime CacheType: type, cycles: usize) !Metrics {
+    var cache: CacheType = .{};
+    var items: [CacheType.capacity]Item = undefined;
+    for (&items, 0..) |*it, i| it.* = .{ .id = i };
+    var timer = try std.time.Timer.start();
+    var c: usize = 0;
+    while (c < cycles) : (c += 1) {
+        var i: usize = 0;
+        while (i < CacheType.capacity) : (i += 1) {
+            _ = cache.push(&items[i]);
+        }
+        _ = timer.lap();
+        cache.clear(null);
+    }
+    const ns = timer.read();
+    const items_cleared = cycles * CacheType.capacity;
+    return .{ .total_ops = items_cleared, .total_ns = ns, .ns_per = fmt_ns_per(items_cleared, ns), .rate_per_s = fmt_rate(items_cleared, ns) };
 }
 
 // ---- Multi-threaded benchmarks ----
@@ -631,4 +679,77 @@ pub fn main() !void {
     try md_append(fbs.getWritten());
 
     std.debug.print("\nSummary written to: {s}\n", .{MD_PATH});
+
+    // ---- Additional diagnostic sections ----
+
+    // 1) Auto vs Fixed Capacity (ST clear with no callback)
+    var auto_fixed = [_]struct { label: []const u8, cap: usize, rate: Stats }{
+        .{ .label = "Auto", .cap = CacheAuto.capacity, .rate = .{} },
+        .{ .label = "8",   .cap = CacheFix8.capacity,  .rate = .{} },
+        .{ .label = "16",  .cap = CacheFix16.capacity, .rate = .{} },
+        .{ .label = "32",  .cap = CacheFix32.capacity, .rate = .{} },
+        .{ .label = "64",  .cap = CacheFix64.capacity, .rate = .{} },
+    };
+    var idx: usize = 0;
+    while (idx < auto_fixed.len) : (idx += 1) {
+        const r = switch (idx) {
+            0 => try bench_clear_no_callback_generic(CacheAuto, 200),
+            1 => try bench_clear_no_callback_generic(CacheFix8, 200),
+            2 => try bench_clear_no_callback_generic(CacheFix16, 200),
+            3 => try bench_clear_no_callback_generic(CacheFix32, 200),
+            else => try bench_clear_no_callback_generic(CacheFix64, 200),
+        };
+        record(&auto_fixed[idx].rate, r.total_ops, r.total_ns);
+    }
+    fbs.reset();
+    try fbs.writer().print("## Auto vs Fixed Capacity (ST, clear no-callback)\n", .{});
+    try fbs.writer().print("| Variant | Capacity | Items | ns/item (median) | items/s (median) |\n| --- | --- | --- | --- | --- |\n", .{});
+    idx = 0; while (idx < auto_fixed.len) : (idx += 1) {
+        var nbx1: [32]u8 = undefined;
+        const items_af = @as(u64, auto_fixed[idx].cap * 200);
+        const s_cap = fmt_u64_commas(&nbx1, auto_fixed[idx].cap);
+        try fbs.writer().print("| {s} | {s} | ", .{ auto_fixed[idx].label, s_cap });
+        try writeRow(fbs.writer(), "clear(no-cb)", items_af, auto_fixed[idx].rate);
+    }
+    try fbs.writer().print("\n", .{});
+    try md_append(fbs.getWritten());
+
+    // 2) sanitize_slots on/off (ST push+pop hits, capacity=16)
+    var san_on = Stats{}; var san_off = Stats{};
+    var rr: usize = 0;
+    // Recompute a small ST pilot and scale for this section (separate from earlier iters)
+    const pilot_san = try bench_push_pop_hits_generic(CacheSanOff, 200_000);
+    const iters_san = scale_iters(200_000, pilot_san.total_ns, target_ms_st);
+    while (rr < repeats) : (rr += 1) {
+        const a = try bench_push_pop_hits_generic(CacheSanOn, iters_san);
+        record(&san_on, a.total_ops, a.total_ns);
+        const b = try bench_push_pop_hits_generic(CacheSanOff, iters_san);
+        record(&san_off, b.total_ops, b.total_ns);
+    }
+    fbs.reset();
+    try fbs.writer().print("## sanitize_slots Toggle (ST, push+pop hits)\n", .{});
+    try fbs.writer().print("| Variant | Iters | ns/iter (median) | iters/s (median) |\n| --- | --- | --- | --- |\n", .{});
+    try writeRow(fbs.writer(), "sanitize=on", @intCast(iters_san), san_on);
+    try writeRow(fbs.writer(), "sanitize=off", @intCast(iters_san), san_off);
+    try fbs.writer().print("\n", .{});
+    try md_append(fbs.getWritten());
+
+    // 3) Active Capacity Sweep (capacity=64; active=32/48/64)
+    var cap32 = Stats{}; var cap48 = Stats{}; var cap64 = Stats{};
+    rr = 0; while (rr < repeats) : (rr += 1) {
+        const r32 = try bench_clear_no_callback_generic(CacheCap64_A32, 200);
+        record(&cap32, r32.total_ops, r32.total_ns);
+        const r48 = try bench_clear_no_callback_generic(CacheCap64_A48, 200);
+        record(&cap48, r48.total_ops, r48.total_ns);
+        const r64 = try bench_clear_no_callback_generic(CacheCap64_A64, 200);
+        record(&cap64, r64.total_ops, r64.total_ns);
+    }
+    fbs.reset();
+    try fbs.writer().print("## Active Capacity Sweep (ST, capacity=64, clear no-callback)\n", .{});
+    try fbs.writer().print("| ActiveCap | Items | ns/item (median) | items/s (median) |\n| --- | --- | --- | --- |\n", .{});
+    try writeRow(fbs.writer(), "32",  @intCast(200 * CacheCap64_A32.capacity), cap32);
+    try writeRow(fbs.writer(), "48",  @intCast(200 * CacheCap64_A48.capacity), cap48);
+    try writeRow(fbs.writer(), "64",  @intCast(200 * CacheCap64_A64.capacity), cap64);
+    try fbs.writer().print("\n", .{});
+    try md_append(fbs.getWritten());
 }

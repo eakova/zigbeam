@@ -259,6 +259,8 @@ pub fn ArcPool(comptime T: type, comptime EnableStats: bool) type {
                 node.counters.weak_count.store(0, .monotonic);
                 node.allocator = self.allocator;
                 node.next_in_freelist = null;
+                node.auto_call_deinit = true;
+                node.on_drop = null;
                 node.data = value;
                 const tagged = Arc(T).InnerTaggedPtr.new(node, Arc(T).TAG_POINTER) catch unreachable;
                 return Arc(T){ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
@@ -272,6 +274,8 @@ pub fn ArcPool(comptime T: type, comptime EnableStats: bool) type {
                 node.counters.strong_count.store(1, .monotonic);
                 node.counters.weak_count.store(0, .monotonic);
                 node.allocator = self.allocator;
+                node.auto_call_deinit = true;
+                node.on_drop = null;
                 node.data = value;
                 const tagged = Arc(T).InnerTaggedPtr.new(node, Arc(T).TAG_POINTER) catch unreachable;
                 return Arc(T){ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
@@ -297,6 +301,8 @@ pub fn ArcPool(comptime T: type, comptime EnableStats: bool) type {
                 node.counters.weak_count.store(0, .monotonic);
                 node.allocator = self.allocator;
                 node.next_in_freelist = null;
+                node.auto_call_deinit = true;
+                node.on_drop = null;
                 initializer(&node.data);
                 const tagged = Arc(T).InnerTaggedPtr.new(node, Arc(T).TAG_POINTER) catch unreachable;
                 return Arc(T){ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
@@ -308,6 +314,8 @@ pub fn ArcPool(comptime T: type, comptime EnableStats: bool) type {
                 node.counters.strong_count.store(1, .monotonic);
                 node.counters.weak_count.store(0, .monotonic);
                 node.allocator = self.allocator;
+                node.auto_call_deinit = true;
+                node.on_drop = null;
                 initializer(&node.data);
                 const tagged = Arc(T).InnerTaggedPtr.new(node, Arc(T).TAG_POINTER) catch unreachable;
                 return Arc(T){ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
@@ -329,6 +337,8 @@ pub fn ArcPool(comptime T: type, comptime EnableStats: bool) type {
                 node.counters.strong_count.store(1, .monotonic);
                 node.counters.weak_count.store(0, .monotonic);
                 node.allocator = self.allocator;
+                node.auto_call_deinit = true;
+                node.on_drop = null;
                 node.next_in_freelist = null;
                 if (initializer(&node.data)) |_| {
                     const tagged = Arc(T).InnerTaggedPtr.new(node, Arc(T).TAG_POINTER) catch unreachable;
@@ -345,6 +355,8 @@ pub fn ArcPool(comptime T: type, comptime EnableStats: bool) type {
                 node.counters.strong_count.store(1, .monotonic);
                 node.counters.weak_count.store(0, .monotonic);
                 node.allocator = self.allocator;
+                node.auto_call_deinit = true;
+                node.on_drop = null;
                 if (initializer(&node.data)) |_| {
                     const tagged = Arc(T).InnerTaggedPtr.new(node, Arc(T).TAG_POINTER) catch unreachable;
                     return Arc(T){ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
@@ -363,15 +375,23 @@ pub fn ArcPool(comptime T: type, comptime EnableStats: bool) type {
         /// Create a cyclic Arc using a temporary weak during construction.
         /// Mirrors Arc.newCyclic for pool-backed allocations.
         pub fn createCyclic(self: *Self, ctor: *const fn (ArcWeak(T)) anyerror!T) !Arc(T) {
+            return self.createCyclicWithOptions(ctor, .{});
+        }
+
+        /// Same as `createCyclic` but allows customizing final-drop behavior.
+        pub fn createCyclicWithOptions(self: *Self, ctor: *const fn (ArcWeak(T)) anyerror!T, opts: Arc(T).CyclicOptions) !Arc(T) {
             if (comptime Arc(T).use_svo) {
                 @compileError("ArcPool.createCyclic requires heap Arc; SVO is not supported");
             }
+            const o: Arc(T).CyclicOptions = opts;
             if (tls_cache.pop()) |node| {
                 if (EnableStats) _ = self.stats_tls_hits.counter.fetchAdd(1, .monotonic);
                 node.counters.strong_count.store(1, .monotonic);
                 node.counters.weak_count.store(1, .monotonic);
                 node.allocator = self.allocator;
                 node.next_in_freelist = null;
+                node.auto_call_deinit = o.auto_call_deinit;
+                node.on_drop = o.on_drop;
                 var weak = ArcWeak(T){ .inner = node };
                 const val = ctor(weak) catch |e| { self.recycleSlow(node); return e; };
                 node.data = val;
@@ -386,6 +406,8 @@ pub fn ArcPool(comptime T: type, comptime EnableStats: bool) type {
                 node.counters.strong_count.store(1, .monotonic);
                 node.counters.weak_count.store(1, .monotonic);
                 node.allocator = self.allocator;
+                node.auto_call_deinit = o.auto_call_deinit;
+                node.on_drop = o.on_drop;
                 var weak = ArcWeak(T){ .inner = node };
                 const val = ctor(weak) catch |e| { self.recycleSlow(node); return e; };
                 node.data = val;
@@ -395,7 +417,7 @@ pub fn ArcPool(comptime T: type, comptime EnableStats: bool) type {
             }
             if (EnableStats) _ = self.stats_allocs.counter.fetchAdd(1, .monotonic);
             self.alloc_mutex.lock(); defer self.alloc_mutex.unlock();
-            return Arc(T).newCyclic(self.allocator, ctor);
+            return Arc(T).newCyclicWithOptions(self.allocator, ctor, o);
         }
 
         /// Recycles an `Arc` back into the pool for future reuse.
@@ -716,15 +738,22 @@ pub fn ArcPoolWithCapacity(comptime T: type, comptime EnableStats: bool, comptim
 
         /// Create a cyclic Arc via pool using a constructor that receives a temporary Weak.
         pub fn createCyclic(self: *Self, ctor: *const fn (Arc(T).ArcWeak(T)) anyerror!T) !Arc(T) {
+            return self.createCyclicWithOptions(ctor, .{});
+        }
+
+        pub fn createCyclicWithOptions(self: *Self, ctor: *const fn (Arc(T).ArcWeak(T)) anyerror!T, opts: Arc(T).CyclicOptions) !Arc(T) {
             if (comptime Arc(T).use_svo) {
                 @compileError("ArcPool.createCyclic requires heap Arc; SVO is not supported");
             }
+            const o: Arc(T).CyclicOptions = opts;
             if (tls_cache.pop()) |node| {
                 if (EnableStats) _ = self.stats_tls_hits.counter.fetchAdd(1, .monotonic);
                 node.counters.strong_count.store(1, .monotonic);
                 node.counters.weak_count.store(1, .monotonic);
                 node.allocator = self.allocator;
                 node.next_in_freelist = null;
+                node.auto_call_deinit = o.auto_call_deinit;
+                node.on_drop = o.on_drop;
                 var weak = Arc(T).ArcWeak(T){ .inner = node };
                 const val = ctor(weak) catch |e| { self.recycleSlow(node); return e; };
                 node.data = val;
@@ -745,6 +774,8 @@ pub fn ArcPoolWithCapacity(comptime T: type, comptime EnableStats: bool, comptim
                     node.counters.weak_count.store(1, .monotonic);
                     node.allocator = self.allocator;
                     node.next_in_freelist = null;
+                    node.auto_call_deinit = o.auto_call_deinit;
+                    node.on_drop = o.on_drop;
                     var weak = Arc(T).ArcWeak(T){ .inner = node };
                     const val = ctor(weak) catch |e| { self.recycleSlow(node); return e; };
                     node.data = val;
@@ -756,7 +787,7 @@ pub fn ArcPoolWithCapacity(comptime T: type, comptime EnableStats: bool, comptim
             }
             if (EnableStats) _ = self.stats_allocs.counter.fetchAdd(1, .monotonic);
             self.alloc_mutex.lock(); defer self.alloc_mutex.unlock();
-            return Arc(T).newCyclic(self.allocator, ctor);
+            return Arc(T).newCyclicWithOptions(self.allocator, ctor, o);
         }
 
         pub fn recycle(self: *Self, arc: Arc(T)) void {

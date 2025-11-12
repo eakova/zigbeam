@@ -58,6 +58,99 @@
 //! ```
 //!
 // No std import required here; keep this module freestanding.
+const builtin = @import("builtin");
+
+/// Options to configure ThreadLocalCache behavior.
+pub const ThreadLocalCacheOptions = struct {
+    /// Compile-time capacity of the cache array. If null, capacity is chosen
+    /// automatically from the pointee size heuristics (8..64).
+    capacity: ?usize = null,
+    /// Runtime limit for how many items can be used even if capacity is larger.
+    /// Defaults to full capacity when null.
+    active_capacity: ?usize = null,
+    /// When true, clear() favors batch-style handling internally (future-proof).
+    /// Current implementation still calls the single-item callback per entry
+    /// because the callback type is per-item.
+    clear_batch: bool = false,
+    /// Optional flush batch size hint for clear(). If null and clear_batch=true,
+    /// it defaults to clamp(capacity/2, 8..32).
+    flush_batch: ?usize = null,
+    /// When true, writes null into freed slots to aid debugging/sanitizers.
+    /// Defaults to true in non-ReleaseFast builds.
+    sanitize_slots: bool = (builtin.mode != .ReleaseFast),
+};
+
+fn max(a: usize, b: usize) usize { return if (a > b) a else b; }
+fn min(a: usize, b: usize) usize { return if (a < b) a else b; }
+fn clamp(v: usize, lo: usize, hi: usize) usize { return min(max(v, lo), hi); }
+
+/// Primary factory that configures the cache via compile-time options.
+pub fn ThreadLocalCacheWithOptions(
+    comptime T: type,
+    comptime recycle_callback: ?*const fn (context: ?*anyopaque, item: T) void,
+    comptime O: ThreadLocalCacheOptions,
+) type {
+    // Validate pointer type
+    comptime {
+        if (@typeInfo(T) != .pointer) @compileError("ThreadLocalCache can only store pointer types.");
+    }
+
+    // Compute capacity heuristically if not provided.
+    const Pointee = @typeInfo(T).pointer.child;
+    const pointee_size: usize = @sizeOf(Pointee);
+    const slot_size = max(pointee_size, 64);
+    const auto_div: usize = if (4096 / slot_size == 0) 1 else 4096 / slot_size;
+    const auto_cap = clamp(auto_div, 8, 64);
+    const CAPACITY: usize = O.capacity orelse auto_cap;
+    const ACTIVE_CAPACITY: usize = O.active_capacity orelse CAPACITY;
+    // FLUSH_BATCH reserved for future batch clear; current per-item callback API keeps per-item loop.
+
+    return struct {
+        const Self = @This();
+        pub const capacity: usize = CAPACITY;
+
+        buffer: [capacity]?T = [_]?T{null} ** capacity,
+        count: usize = 0,
+
+        /// Max items effectively allowed at runtime (<= capacity).
+        pub const active_capacity: usize = ACTIVE_CAPACITY;
+
+        /// Pop one item from the local cache.
+        pub inline fn pop(self: *Self) ?T {
+            if (self.count == 0) return null;
+            self.count -= 1;
+            const item = self.buffer[self.count];
+            if (comptime O.sanitize_slots) self.buffer[self.count] = null;
+            return item;
+        }
+
+        /// Push one item into the local cache. Returns false if the cache is full
+        /// per the active_capacity limit.
+        pub inline fn push(self: *Self, item: T) bool {
+            if (self.count >= active_capacity) return false;
+            self.buffer[self.count] = item;
+            self.count += 1;
+            return true;
+        }
+
+        /// Clear the local cache. If a recycle callback is present, it is invoked
+        /// once per item to return it to a global pool.
+        pub fn clear(self: *Self, global_pool_context: ?*anyopaque) void {
+            if (self.count == 0) return;
+            // For now, we always call per-item; FLUSH_BATCH kept as future hint.
+            while (self.count > 0) {
+                self.count -= 1;
+                const item = self.buffer[self.count].?;
+                if (comptime recycle_callback != null) recycle_callback.?(global_pool_context, item);
+                if (comptime O.sanitize_slots) self.buffer[self.count] = null;
+            }
+        }
+
+        pub inline fn len(self: *const Self) usize { return self.count; }
+        pub inline fn isEmpty(self: *const Self) bool { return self.count == 0; }
+        pub inline fn isFull(self: *const Self) bool { return self.count == capacity; }
+    };
+}
 
 /// A generic, fixed-size, thread-local cache for object pooling.
 ///
@@ -70,7 +163,11 @@ pub fn ThreadLocalCache(
     comptime T: type,
     comptime recycle_callback: ?*const fn (context: ?*anyopaque, item: T) void,
 ) type {
-    return ThreadLocalCacheWithCapacity(T, recycle_callback, 8);
+    // Conservative default capacity to match existing integration tests.
+    return ThreadLocalCacheWithOptions(T, recycle_callback, .{
+        .capacity = 16,
+        .active_capacity = 16,
+    });
 }
 
 /// Same as `ThreadLocalCache`, but allows choosing the capacity at comptime.
@@ -82,96 +179,11 @@ pub fn ThreadLocalCacheWithCapacity(
     comptime recycle_callback: ?*const fn (context: ?*anyopaque, item: T) void,
     comptime Capacity: usize,
 ) type {
-    // Compile-time validation to ensure T is a pointer type. This prevents
-    // misuse, for example, by trying to cache large structs by value.
-    comptime {
-        if (@typeInfo(T) != .pointer) {
-            @compileError("ThreadLocalCache can only store pointer types.");
-        }
-    }
-
-    return struct {
-        const Self = @This();
-
-        /// The optimal size for an L1 cache. Small enough to be fast and avoid
-        /// cache pollution, large enough to be effective. 8 pointers on a 64-bit
-        /// system is 64 bytes, fitting perfectly into a single CPU cache line.
-        pub const capacity: usize = Capacity;
-
-        /// The underlying storage for the cache. Using an array of optionals
-        /// makes debugging easier and is optimized away in release builds.
-        buffer: [capacity]?T = [_]?T{null} ** capacity,
-
-        /// The number of items currently in the cache.
-        count: usize = 0,
-
-        /// Pop one item from the local cache.
-        /// Hot path: no locks, no atomics. Returns null if empty.
-        pub inline fn pop(self: *Self) ?T {
-            // This branch is highly predictable by the CPU. In a high-throughput system,
-            // the cache will often fluctuate between empty and non-empty states.
-            if (self.count == 0) {
-                return null;
-            }
-
-            // The core logic: decrement the count and return the item.
-            // When inlined, this compiles down to just a few CPU instructions.
-            self.count -= 1;
-            const item = self.buffer[self.count];
-            self.buffer[self.count] = null; // Help GC/debuggers by nulling out the slot.
-            return item;
-        }
-
-        /// Push one item into the local cache.
-        /// Returns true on success, false if cache is full.
-        pub inline fn push(self: *Self, item: T) bool {
-            // This branch is also highly predictable. The cache is either full or not.
-            if (self.count >= capacity) {
-                return false;
-            }
-
-            // The core logic: place the item in the next available slot and
-            // increment the count.
-            self.buffer[self.count] = item;
-            self.count += 1;
-            return true;
-        }
-
-        /// Clear the local cache. Guarantees `len() == 0` afterwards.
-        /// If `recycle_callback` exists, call it for each item; otherwise just drop pointers.
-        pub fn clear(self: *Self, global_pool_context: ?*anyopaque) void {
-            // A single loop correctly and efficiently handles all cases.
-            while (self.count > 0) {
-                self.count -= 1;
-                const item = self.buffer[self.count].?;
-
-                // This `if` happens at COMPILE TIME. The compiler generates one of two
-                // specialized loops, with zero runtime cost for the check.
-                if (comptime recycle_callback != null) {
-                    // Path 1: A callback exists. Use it to recycle the item.
-                    recycle_callback.?(global_pool_context, item);
-                }
-
-                // In both cases (with or without a callback), we clear the buffer slot.
-                self.buffer[self.count] = null;
-            }
-
-            // When no callback is provided, `global_pool_context` is ignored by design.
-        }
-
-        /// Number of items currently in the cache.
-        pub inline fn len(self: *const Self) usize {
-            return self.count;
-        }
-
-        /// True if the cache is empty.
-        pub inline fn isEmpty(self: *const Self) bool {
-            return self.count == 0;
-        }
-
-        /// True if the cache is full.
-        pub inline fn isFull(self: *const Self) bool {
-            return self.count == capacity;
-        }
-    };
+    return ThreadLocalCacheWithOptions(T, recycle_callback, .{
+        .capacity = Capacity,
+        .active_capacity = Capacity,
+        .clear_batch = false,
+        .flush_batch = null,
+        .sanitize_slots = (builtin.mode != .ReleaseFast),
+    });
 }

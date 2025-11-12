@@ -155,7 +155,12 @@ test "Arc initWithInitializer works (inline and heap)" {
 
 // newCyclic should allow constructing a value that captures a Weak to itself.
 test "Arc newCyclic builds self-referential weak and upgrades before/after drop semantics" {
-    const Node = struct { weak_self: ArcModule.ArcWeak(@This()) = ArcModule.ArcWeak(@This()).empty() };
+    const Node = struct {
+        weak_self: ArcModule.ArcWeak(@This()) = ArcModule.ArcWeak(@This()).empty(),
+        pub fn deinit(self: *@This()) void {
+            self.weak_self.release();
+        }
+    };
     const ArcNode = ArcModule.Arc(Node);
 
     var arc = try ArcNode.newCyclic(testing.allocator, struct {

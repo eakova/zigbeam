@@ -269,7 +269,10 @@ test "ArcCycleDetector scales with pooled tracking across threads" {
 }
 
 // newCyclic: self-weak tek başına güçlü döngü oluşturmaz; dedektör sızıntı bulmamalı.
-const NodeC_New = struct { weak_self: ArcModule.ArcWeak(@This()), pad: [64]u8 = [_]u8{0} ** 64 };
+const NodeC_New = struct {
+    weak_self: ArcModule.ArcWeak(@This()),
+    pad: [64]u8 = [_]u8{0} ** 64,
+};
 const ArcNodeC_New = ArcModule.Arc(NodeC_New);
 const DetectorC_New = DetectorModule.ArcCycleDetector(NodeC_New);
 fn traceC_New(_: ?*anyopaque, allocator: std.mem.Allocator, data: *const NodeC_New, children: *DetectorC_New.ChildList) void {
@@ -293,7 +296,10 @@ test "ArcCycleDetector ignores self-weak from Arc.newCyclic" {
 }
 
 // createCyclic: pool üstünden self-weak oluşturulur; güçlü döngü yoksa dedektör sızıntı görmez.
-const NodeC_Pool = struct { weak_self: ArcModule.ArcWeak(@This()), pad: [64]u8 = [_]u8{0} ** 64 };
+const NodeC_Pool = struct {
+    weak_self: ArcModule.ArcWeak(@This()),
+    pad: [64]u8 = [_]u8{0} ** 64,
+};
 const PoolC_Pool = ArcPoolModule.ArcPool(NodeC_Pool, false);
 const DetectorC_Pool = DetectorModule.ArcCycleDetector(NodeC_Pool);
 fn traceC_Pool(_: ?*anyopaque, allocator: std.mem.Allocator, data: *const NodeC_Pool, children: *DetectorC_Pool.ChildList) void {

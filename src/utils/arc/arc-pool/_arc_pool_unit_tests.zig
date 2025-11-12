@@ -131,7 +131,10 @@ test "ArcPool enforces TLS capacity and early flush pushes to L2" {
 }
 
 test "ArcPool createCyclic builds self-weak and upgrades before drop" {
-    const Node = struct { weak_self: ArcModule.ArcWeak(@This()) = ArcModule.ArcWeak(@This()).empty() };
+const Node = struct {
+    weak_self: ArcModule.ArcWeak(@This()) = ArcModule.ArcWeak(@This()).empty(),
+    pub fn deinit(self: *@This()) void { self.weak_self.release(); }
+};
     const NodePool = PoolModule.ArcPool(Node, false);
     var pool = NodePool.init(testing.allocator, .{});
     defer pool.deinit();
