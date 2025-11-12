@@ -107,7 +107,7 @@ fn sortAsc(slice: []u64) void {
     }
 }
 
-fn medianIqr(slice_in: []u64) struct { median: u64, q1: u64, q3: u64 } {
+fn medianIqr(slice_in: []const u64) struct { median: u64, q1: u64, q3: u64 } {
     var buf: [16]u64 = .{0} ** 16;
     const n = slice_in.len;
     if (n == 0) return .{ .median = 0, .q1 = 0, .q3 = 0 };
@@ -342,6 +342,54 @@ fn bench_mt_fill_and_clear(threads_count: usize, cycles_per_thread: usize) !Metr
     return .{ .total_ops = total_items, .total_ns = ns, .ns_per = ns_per, .rate_per_s = rate };
 }
 
+// MT variant without callback to compare apples-to-apples against the callback case.
+threadlocal var tls_mt_clear_nocb: CacheNoCb = .{};
+fn worker_fill_and_clear_nocb(cycles: usize, start_flag: *AtomicUsize) void {
+    while (start_flag.load(.seq_cst) == 0) {
+        std.Thread.yield() catch {};
+    }
+    var items: [CacheNoCb.capacity]Item = undefined;
+    for (&items, 0..) |*it, i| it.* = .{ .id = i };
+    var c: usize = 0;
+    while (c < cycles) : (c += 1) {
+        var i: usize = 0;
+        while (i < CacheNoCb.capacity) : (i += 1) {
+            _ = tls_mt_clear_nocb.push(&items[i]);
+        }
+        tls_mt_clear_nocb.clear(null);
+    }
+}
+
+fn bench_mt_fill_and_clear_nocb(threads_count: usize, cycles_per_thread: usize) !Metrics {
+    var start_flag = AtomicUsize.init(0);
+    const threads = try std.heap.page_allocator.alloc(std.Thread, threads_count);
+    defer std.heap.page_allocator.free(threads);
+    for (threads) |*t| {
+        t.* = try std.Thread.spawn(.{}, worker_fill_and_clear_nocb, .{ cycles_per_thread, &start_flag });
+    }
+    var timer = try std.time.Timer.start();
+    _ = start_flag.store(1, .seq_cst);
+    for (threads) |*t| t.join();
+    const ns = timer.read();
+    const total_items = threads_count * cycles_per_thread * CacheNoCb.capacity;
+    const rate = fmt_rate(total_items, ns);
+    const ns_per = fmt_ns_per(total_items, ns);
+    return .{ .total_ops = total_items, .total_ns = ns, .ns_per = ns_per, .rate_per_s = rate };
+}
+
+// Small helper to write a compact table row with rounded integers and a safe "<1" for ns/op=0.
+fn writeRow(wr: anytype, label: []const u8, iterations: u64, stats: Stats) !void {
+    var nb1: [32]u8 = undefined;
+    var nb2: [32]u8 = undefined;
+    var nb3: [32]u8 = undefined;
+    const med = medianIqr(stats.ns_op_list[0..stats.len]);
+    const thr = medianIqr(stats.ops_s_list[0..stats.len]);
+    const s_iters = fmt_u64_commas(&nb1, iterations);
+    const s_ns = if (med.median == 0 and thr.median > 0) "<1" else fmt_u64_commas(&nb2, med.median);
+    const s_ops = fmt_u64_commas(&nb3, thr.median);
+    try wr.print("| {s} | {s} | {s} | {s} |\n", .{ label, s_iters, s_ns, s_ops });
+}
+
 pub fn main() !void {
     // Configuration knobs — adjust as needed (static for Zig 0.15 tests)
     // Quick mode: keep total wall-time well under 1 minute
@@ -499,6 +547,27 @@ pub fn main() !void {
     const s_items_h_cb = fmt_rate_human(&nb6, thr4.median);
     try fbs.writer().print("## clear_with_callback\n- cycles: {s} (items/cycle: {s})\n- repeats: {}\n- ns/item median (IQR): {s} ({s}–{s})\n- items/s median: {s} (≈ {s} M/s)\n\n", .{ s_cycles_cb, s_items_per_cb, st_stats.len, s_cb_med, s_cb_med, s_cb_med, s_items_s_cb, s_items_h_cb });
     try md_append(fbs.getWritten());
+
+    // Consolidated table: callback toggle (single-threaded)
+    // Re-run minimal repeats to fill per-case stats cleanly for the table (keeps code simple).
+    var st_tab_stats_on = Stats{};
+    var st_tab_stats_off = Stats{};
+    rep = 0; while (rep < repeats) : (rep += 1) {
+        const r_on = try bench_clear_with_callback(run_cycles, CacheWithCb.capacity);
+        record(&st_tab_stats_on, r_on.total_ops, r_on.total_ns);
+        const r_off = try bench_clear_no_callback(run_cycles, CacheNoCb.capacity);
+        record(&st_tab_stats_off, r_off.total_ops, r_off.total_ns);
+    }
+    fbs.reset();
+    try fbs.writer().print("## Callback Toggle (Single-Threaded)\n", .{});
+    try fbs.writer().print("| Variant | Items | ns/item (median) | items/s (median) |\n", .{});
+    try fbs.writer().print("| --- | --- | --- | --- |\n", .{});
+    const items_per_cycle_st: u64 = @intCast(CacheWithCb.capacity);
+    const items_total: u64 = items_per_cycle_st * @as(u64, run_cycles);
+    try writeRow(fbs.writer(), "clear(no-callback)", items_total, st_tab_stats_on);
+    try writeRow(fbs.writer(), "clear(callback)", items_total, st_tab_stats_off);
+    try fbs.writer().print("\n", .{});
+    try md_append(fbs.getWritten());
     std.debug.print("clear_with_callback  cycles={}  ns/item={} ({}–{})  items/s={} ({}–{})\n", .{ run_cycles, med4.median, med4.q1, med4.q3, thr4.median, thr4.q1, thr4.q3 });
 
     // Multi-thread benchmarks
@@ -540,6 +609,25 @@ pub fn main() !void {
     try fbs.writer().print("## mt_fill_and_clear(shared_cb)\n- threads: {}\n- cycles/thread: {s}\n- repeats: {}\n- ns/item median (IQR): {s} ({s}–{s})\n- items/s median: {s} (≈ {s} M/s)\n- per-thread items/s median: {s} M/s\n\n", .{ threads, s_cycles_mt, mt_stats.len, s_ns_med_6, s_ns_med_6, s_ns_med_6, s_items_s_6, s_items_h_6, s_per_thread_items });
     try md_append(fbs.getWritten());
     std.debug.print("mt_fill_and_clear  threads={} cycles/thread={}  ns/item={} ({}–{})  items/s={} ({}–{})\n", .{ threads, clear_mt_cycles, med6.median, med6.q1, med6.q3, thr6.median, thr6.q1, thr6.q3 });
+
+    // Consolidated table: callback toggle (multi-threaded)
+    var mt_tab_stats_on = Stats{};
+    var mt_tab_stats_off = Stats{};
+    rep = 0; while (rep < repeats) : (rep += 1) {
+        const r_on = try bench_mt_fill_and_clear(threads, clear_mt_cycles);
+        record(&mt_tab_stats_on, r_on.total_ops, r_on.total_ns);
+        const r_off = try bench_mt_fill_and_clear_nocb(threads, clear_mt_cycles);
+        record(&mt_tab_stats_off, r_off.total_ops, r_off.total_ns);
+    }
+    fbs.reset();
+    try fbs.writer().print("### Callback Toggle (Multi-Threaded)\n", .{});
+    try fbs.writer().print("| Variant | Items | ns/item (median) | items/s (median) |\n", .{});
+    try fbs.writer().print("| --- | --- | --- | --- |\n", .{});
+    const mt_items_total: u64 = @intCast(threads * clear_mt_cycles * CacheWithCb.capacity);
+    try writeRow(fbs.writer(), "clear(callback)", mt_items_total, mt_tab_stats_on);
+    try writeRow(fbs.writer(), "clear(no-callback)", mt_items_total, mt_tab_stats_off);
+    try fbs.writer().print("\n", .{});
+    try md_append(fbs.getWritten());
 
     std.debug.print("\nSummary written to: {s}\n", .{MD_PATH});
 }

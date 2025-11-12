@@ -1,7 +1,7 @@
 # Zig-Beam: Reusable building blocks for concurrent programming
 
 ![Zig 0.15.x](https://img.shields.io/badge/Zig-0.15.x-blue)
-![License](https://img.shields.io/badge/license-TBD-lightgrey)
+![License](https://img.shields.io/badge/license-MIT_OR_Apache--2.0-blue.svg)
 ![CI](https://github.com/eakova/zig-beam/actions/workflows/ci.yml/badge.svg)
 
 This repository hosts multiple Zig libraries under one roof. Each library can be used on its own or together via a common wrapper. The workspace is designed to be practical: every library ships with small samples, focused tests, and repeatable benchmarks.

@@ -8,7 +8,7 @@ const ArcHeapBytes = ArcModule.Arc([32]u8);
 const PoolValue = struct {
     bytes: [32]u8,
 };
-const Pool = ArcPoolModule.ArcPool(PoolValue);
+const Pool = ArcPoolModule.ArcPool(PoolValue, false);
 
 const WorkerCtx = struct {
     shared: *ArcU64,
@@ -104,4 +104,41 @@ test "Arc downgrade/upgrade remains stable under contention" {
 
     try testing.expectEqual(@as(usize, 1), shared.strongCount());
     try testing.expectEqual(@as(usize, 0), shared.weakCount());
+}
+
+test "Arc newCyclic integrates: self-weak upgrade ok before drop, fails after" {
+    const Node = struct { weak_self: ArcModule.ArcWeak(@This()) = ArcModule.ArcWeak(@This()).empty() };
+    const ArcNode = ArcModule.Arc(Node);
+
+    var arc = try ArcNode.newCyclic(testing.allocator, struct {
+        fn ctor(w: ArcModule.ArcWeak(Node)) anyerror!Node {
+            // keep an owned weak by cloning
+            return Node{ .weak_self = w.clone() };
+        }
+    }.ctor);
+    const up = arc.get().*.weak_self.upgrade();
+    try testing.expect(up != null);
+    if (up) |t| t.release();
+    const kept = arc.get().*.weak_self.clone();
+    arc.release();
+    try testing.expect(kept.upgrade() == null);
+    kept.release();
+}
+
+test "ArcPool createCyclic integrates: pooled self-weak works and recycles" {
+    const Node = struct { weak_self: ArcModule.ArcWeak(@This()) = ArcModule.ArcWeak(@This()).empty() };
+    const Pooled = ArcPoolModule.ArcPool(Node, false);
+    var pool = Pooled.init(testing.allocator);
+    defer pool.deinit();
+
+    const ctor = struct {
+        fn f(w: ArcModule.ArcWeak(Node)) anyerror!Node { return Node{ .weak_self = w.clone() }; }
+    }.f;
+
+    var arc = try pool.createCyclic(ctor);
+    const up = arc.get().*.weak_self.upgrade();
+    try testing.expect(up != null);
+    if (up) |t| t.release();
+    pool.recycle(arc);
+    pool.drainThreadCache();
 }

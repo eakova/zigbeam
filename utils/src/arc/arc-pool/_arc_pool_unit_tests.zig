@@ -4,7 +4,7 @@ const ArcModule = @import("arc_core");
 const PoolModule = @import("arc_pool");
 
 const Payload = struct { bytes: [32]u8 };
-const Pool = PoolModule.ArcPool(Payload);
+const Pool = PoolModule.ArcPool(Payload, false);
 
 test "ArcPool reuses recycled nodes" {
     var pool = Pool.init(testing.allocator);
@@ -23,7 +23,7 @@ test "ArcPool reuses recycled nodes" {
 }
 
 test "ArcPool bypasses SVO types" {
-    const SvoPool = PoolModule.ArcPool(u8);
+    const SvoPool = PoolModule.ArcPool(u8, false);
     var pool = SvoPool.init(testing.allocator);
     defer pool.deinit();
 
@@ -74,5 +74,70 @@ test "ArcPool.withThreadCache drains TLS on error" {
         try testing.expectEqual(ctx.ptrs[expected_index], reused[i]);
     }
 
+    pool.drainThreadCache();
+}
+
+test "ArcPool createWithInitializer writes payload in-place" {
+    var pool = Pool.init(testing.allocator);
+    defer pool.deinit();
+
+    const init_fn = struct { fn f(p: *Payload) void { @memset(&p.bytes, 7); } }.f;
+    var arc = try pool.createWithInitializer(init_fn);
+    defer pool.recycle(arc);
+    try testing.expectEqual(@as(u8, 7), arc.get().*.bytes[0]);
+    pool.drainThreadCache();
+}
+
+test "ArcPool enforces TLS capacity and early flush pushes to L2" {
+    // Use stats=on to observe L2 reuse counter.
+    const PoolOn = PoolModule.ArcPool(Payload, true);
+    var pool = PoolOn.init(testing.allocator);
+    defer pool.deinit();
+
+    const tls_cap = pool.tls_active_capacity;
+    const flush_batch = pool.flush_batch;
+    try testing.expect(tls_cap >= 8 and tls_cap <= 64);
+
+    // Recycle more than TLS capacity to force spill to L2 (early flush should trigger before full batch).
+    // Push beyond TLS capacity and one flush window to ensure spill to L2.
+    const extra: usize = 8;
+    const total: usize = tls_cap + flush_batch + extra;
+
+    // Phase 1: fill via recycle raw arcs
+    var i: usize = 0;
+    while (i < total) : (i += 1) {
+        const arc_raw = try ArcModule.Arc(Payload).init(testing.allocator, .{ .bytes = [_]u8{0} ** 32 });
+        pool.recycle(arc_raw);
+    }
+    // Push all TLS into L2 so next creates will pop from L2
+    pool.drainThreadCache();
+    // Phase 2: allocate back from pool — should come from L2 now
+    var j: usize = 0;
+    while (j < total) : (j += 1) {
+        const arc_p = try pool.create(.{ .bytes = [_]u8{@intCast(j)} ** 32 });
+        pool.recycle(arc_p);
+    }
+
+    const reuses = pool.stats_reuses.counter.load(.monotonic);
+    // Be tolerant across platforms; at least some reuse must be observed.
+    try testing.expect(reuses > 0);
+    pool.drainThreadCache();
+}
+
+test "ArcPool createCyclic builds self-weak and upgrades before drop" {
+    const Node = struct { weak_self: ArcModule.ArcWeak(@This()) = ArcModule.ArcWeak(@This()).empty() };
+    const NodePool = PoolModule.ArcPool(Node, false);
+    var pool = NodePool.init(testing.allocator);
+    defer pool.deinit();
+
+    const make_node = struct {
+        fn ctor(w: ArcModule.ArcWeak(Node)) anyerror!Node { return Node{ .weak_self = w }; }
+    }.ctor;
+
+    var arc = try pool.createCyclic(make_node);
+    const up = arc.get().*.weak_self.upgrade();
+    try testing.expect(up != null);
+    if (up) |t| t.release();
+    pool.recycle(arc);
     pool.drainThreadCache();
 }

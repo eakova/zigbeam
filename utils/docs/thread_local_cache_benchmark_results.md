@@ -21,50 +21,62 @@
 - Logical CPUs: 0
 
 ## push_pop_hits
-- iters: 32,827,247
+- iters: 42,712,227
 - repeats: 2
 - ns/op median (IQR): 2 (2–2)
-- pairs/s median: 432,009,960 (≈ 432 M/s)
-- single-op ops/s median: 864,019,920 (≈ 864 M/s)
+- pairs/s median: 482,107,151 (≈ 482 M/s)
+- single-op ops/s median: 964,214,302 (≈ 964 M/s)
 
 ## pop_empty
 - attempts: 50,000,000
 - repeats: 2
 - ns/attempt median (IQR): 0 (0–0)
-- attempts/s median: 609,756,097,560,975 (≈ 609,756 M/s)
+- attempts/s median: 0 (≈ 0 M/s)
 
 ## push_overflow(full)
 - attempts: 50,000,000
 - repeats: 2
 - ns/attempt median (IQR): 0 (0–0)
-- attempts/s median: 595,238,095,238,095 (≈ 595,238 M/s)
+- attempts/s median: 1,204,994,192,799,070 (≈ 1,204,994 M/s)
 
 ## clear_no_callback
 - cycles: 50,000,000 (items/cycle: 8)
 - repeats: 2
 - ns/item median (IQR): 0 (0–0)
-- items/s median: 9,756,097,560,975,609 (≈ 9,756,097 M/s)
+- items/s median: 4,761,904,761,904,761 (≈ 4,761,904 M/s)
 
 ## clear_with_callback
 - cycles: 50,000,000 (items/cycle: 8)
 - repeats: 2
 - ns/item median (IQR): 0 (0–0)
-- items/s median: 9,639,953,542,392,566 (≈ 9,639,953 M/s)
+- items/s median: 4,878,048,780,487,804 (≈ 4,878,048 M/s)
+
+## Callback Toggle (Single-Threaded)
+| Variant | Items | ns/item (median) | items/s (median) |
+| --- | --- | --- | --- |
+| clear(no-callback) | 400,000,000 | <1 | 4,761,904,761,904,761 |
+| clear(callback) | 400,000,000 | 0 | 0 |
 
 ## mt_push_pop_hits
 - threads: 4
 - iters/thread: 50,000,000
 - repeats: 2
 - ns/iter median (IQR): 0 (0–0)
-- pairs/s median: 2,244,468,443 (≈ 2 M/s)
-- per-thread pairs/s median: 561 M/s
+- pairs/s median: 2,226,540,991 (≈ 2 M/s)
+- per-thread pairs/s median: 556 M/s
 - per-thread single-op ops/s median: 1 M/s
 
 ## mt_fill_and_clear(shared_cb)
 - threads: 4
-- cycles/thread: 359,796
+- cycles/thread: 307,549
 - repeats: 2
-- ns/item median (IQR): 12 (12–12)
-- items/s median: 76,213,039 (≈ 76 M/s)
-- per-thread items/s median: 19 M/s
+- ns/item median (IQR): 13 (13–13)
+- items/s median: 75,393,151 (≈ 75 M/s)
+- per-thread items/s median: 18 M/s
+
+### Callback Toggle (Multi-Threaded)
+| Variant | Items | ns/item (median) | items/s (median) |
+| --- | --- | --- | --- |
+| clear(callback) | 9,841,568 | 13 | 70,474,996 |
+| clear(no-callback) | 9,841,568 | <1 | 1,727,958,309 |
 
