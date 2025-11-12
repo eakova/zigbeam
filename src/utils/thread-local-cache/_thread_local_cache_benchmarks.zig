@@ -39,17 +39,46 @@ const CacheCap64_A64 = cache_raw.ThreadLocalCacheWithOptions(*Item, null, .{ .ca
 const MD_PATH = "docs/utils/thread_local_cache_benchmark_results.md";
 
 fn md_truncate_write(content: []const u8) !void {
-    var file = try std.fs.cwd().createFile(MD_PATH, .{ .truncate = true });
+    var file = std.fs.cwd().createFile(MD_PATH, .{ .truncate = true }) catch |err| switch (err) {
+        error.NoSpaceLeft => {
+            // Try to at least leave a small marker file; ignore errors.
+            var f = std.fs.cwd().createFile(MD_PATH, .{ .truncate = true }) catch return;
+            defer f.close();
+            _ = f.writeAll("# ThreadLocalCache Benchmark Results\n\n(note: truncated, no space left)\n") catch {};
+            return;
+        },
+        else => return err,
+    };
     defer file.close();
-    try file.writeAll(content);
+    file.writeAll(content) catch |err| switch (err) {
+        error.NoSpaceLeft => {
+            _ = file.setEndPos(0) catch {};
+            _ = file.writeAll("# ThreadLocalCache Benchmark Results\n\n(note: truncated, no space left)\n") catch {};
+            return;
+        },
+        else => return err,
+    };
 }
 
 fn md_append(content: []const u8) !void {
     var file = std.fs.cwd().openFile(MD_PATH, .{ .mode = .read_write }) catch
-        try std.fs.cwd().createFile(MD_PATH, .{});
+        std.fs.cwd().createFile(MD_PATH, .{}) catch |err| switch (err) {
+            error.NoSpaceLeft => return, // give up quietly; console still has details
+            else => return err,
+        };
     defer file.close();
-    try file.seekFromEnd(0);
-    try file.writeAll(content);
+    if (file.seekFromEnd(0)) |_| {
+        file.writeAll(content) catch |err| switch (err) {
+            error.NoSpaceLeft => return, // ignore; do not fail the whole bench
+            else => return err,
+        };
+    } else |_| {
+        // If seek fails (unlikely), try best-effort write at current pos.
+        file.writeAll(content) catch |err| switch (err) {
+            error.NoSpaceLeft => return,
+            else => return err,
+        };
+    }
 }
 
 // Format helpers for Markdown: u64 with thousands separators.
@@ -92,6 +121,33 @@ fn fmt_rate_human(buf: *[32]u8, rate: u64) []const u8 {
     }
 }
 
+// f64 formatting helpers to avoid integer underflow/overflow artifacts
+fn fmt_f64_commas2(buf: *[48]u8, val: f64) []const u8 {
+    const ival_f = @floor(val);
+    const ival = @as(u64, @intFromFloat(ival_f));
+    var frac_f = (val - ival_f) * 100.0;
+    if (frac_f < 0) frac_f = -frac_f;
+    const frac = @as(u64, @intFromFloat(frac_f + 0.5));
+    var ibuf: [32]u8 = undefined;
+    const is = fmt_u64_commas(&ibuf, ival);
+    var out: [48]u8 = undefined;
+    var o: usize = 0;
+    @memcpy(out[o .. o + is.len], is);
+    o += is.len;
+    out[o] = '.'; o += 1;
+    out[o] = '0' + @as(u8, @intCast((frac / 10) % 10)); o += 1;
+    out[o] = '0' + @as(u8, @intCast(frac % 10)); o += 1;
+    @memcpy(buf[0..o], out[0..o]);
+    return buf[0..o];
+}
+
+fn scale_rate_f64(scaled: *f64, rate: f64) []const u8 {
+    if (rate >= 1_000_000_000.0) { scaled.* = rate / 1_000_000_000.0; return "G/s"; }
+    if (rate >= 1_000_000.0) { scaled.* = rate / 1_000_000.0; return "M/s"; }
+    if (rate >= 1_000.0) { scaled.* = rate / 1_000.0; return "K/s"; }
+    scaled.* = rate; return "/s";
+}
+
 fn fmt_rate(ops: usize, ns: u64) u64 {
     if (ns == 0) return 0;
     const num: u128 = @as(u128, ops) * 1_000_000_000;
@@ -106,10 +162,13 @@ fn fmt_ns_per(ops: usize, ns: u64) u64 {
 // ---- Benchmark helpers (warm-up, repeats, scaling) ----
 
 const Stats = struct {
-    // Arrays sized for small repeat counts
+    // Raw per-run measurements to enable f64-friendly calculations
+    ns_list: [16]u64 = .{0} ** 16,
+    ops_list: [16]u64 = .{0} ** 16,
+    len: usize = 0,
+    // Integer summaries kept for backwards compatibility (not used for medians)
     ns_op_list: [16]u64 = .{0} ** 16,
     ops_s_list: [16]u64 = .{0} ** 16,
-    len: usize = 0,
 };
 
 fn sortAsc(slice: []u64) void {
@@ -155,10 +214,54 @@ fn scale_iters(pilot_iters: usize, pilot_ns: u64, target_ms: u64) usize {
 }
 
 fn record(stats: *Stats, ops: usize, ns: u64) void {
-    if (stats.len >= stats.ns_op_list.len) return; // clamp
+    if (stats.len >= stats.ns_list.len) return; // clamp
+    // raw values
+    stats.ns_list[stats.len] = ns;
+    stats.ops_list[stats.len] = @intCast(ops);
+    // integer summaries (legacy)
     stats.ns_op_list[stats.len] = fmt_ns_per(ops, ns);
     stats.ops_s_list[stats.len] = fmt_rate(ops, ns);
     stats.len += 1;
+}
+
+// f64 median helpers computed from raw (ns,ops)
+const F64Iqr = struct { median: f64, q1: f64, q3: f64 };
+
+fn ratio_ns_per_op(ns: u64, ops: u64) f64 {
+    if (ops == 0) return 0.0;
+    return @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(ops));
+}
+
+fn ratio_ops_per_sec(ns: u64, ops: u64) f64 {
+    if (ns == 0) return 0.0;
+    return (@as(f64, @floatFromInt(ops)) * 1_000_000_000.0) / @as(f64, @floatFromInt(ns));
+}
+
+fn computeMedianIqrF64(ratio_fn: fn (u64, u64) f64, ns_list: []const u64, ops_list: []const u64, n: usize) F64Iqr {
+    if (n == 0) return .{ .median = 0.0, .q1 = 0.0, .q3 = 0.0 };
+    var buf: [16]f64 = .{0.0} ** 16;
+    var i: usize = 0;
+    while (i < n) : (i += 1) buf[i] = ratio_fn(ns_list[i], ops_list[i]);
+    var k: usize = 1;
+    while (k < n) : (k += 1) {
+        var j: usize = k;
+        while (j > 0 and buf[j - 1] > buf[j]) : (j -= 1) {
+            const t = buf[j - 1]; buf[j - 1] = buf[j]; buf[j] = t;
+        }
+    }
+    const mid = n / 2;
+    const med = if (n % 2 == 1) buf[mid] else (buf[mid - 1] + buf[mid]) / 2.0;
+    const q1 = buf[n / 4];
+    const q3 = buf[(3 * n) / 4];
+    return .{ .median = med, .q1 = q1, .q3 = q3 };
+}
+
+fn medianNsPerOpF64(stats: *const Stats) F64Iqr {
+    return computeMedianIqrF64(ratio_ns_per_op, stats.ns_list[0..stats.len], stats.ops_list[0..stats.len], stats.len);
+}
+
+fn medianOpsPerSecF64(stats: *const Stats) F64Iqr {
+    return computeMedianIqrF64(ratio_ops_per_sec, stats.ns_list[0..stats.len], stats.ops_list[0..stats.len], stats.len);
 }
 
 const Metrics = struct { total_ops: usize, total_ns: u64, ns_per: u64, rate_per_s: u64 };
@@ -429,14 +532,18 @@ fn bench_mt_fill_and_clear_nocb(threads_count: usize, cycles_per_thread: usize) 
 // Small helper to write a compact table row with rounded integers and a safe "<1" for ns/op=0.
 fn writeRow(wr: anytype, label: []const u8, iterations: u64, stats: Stats) !void {
     var nb1: [32]u8 = undefined;
-    var nb2: [32]u8 = undefined;
-    var nb3: [32]u8 = undefined;
-    const med = medianIqr(stats.ns_op_list[0..stats.len]);
-    const thr = medianIqr(stats.ops_s_list[0..stats.len]);
     const s_iters = fmt_u64_commas(&nb1, iterations);
-    const s_ns = if (med.median == 0 and thr.median > 0) "<1" else fmt_u64_commas(&nb2, med.median);
-    const s_ops = fmt_u64_commas(&nb3, thr.median);
-    try wr.print("| {s} | {s} | {s} | {s} |\n", .{ label, s_iters, s_ns, s_ops });
+    const nsf = medianNsPerOpF64(&stats);
+    const opsf = medianOpsPerSecF64(&stats);
+    // ns/op: show <0.01 for very small values
+    const ns_display = if (nsf.median > 0.009) nsf.median else -1.0;
+    var scaled: f64 = 0; const unit = scale_rate_f64(&scaled, opsf.median);
+    var fbuf: [48]u8 = undefined; const s_rate = fmt_f64_commas2(&fbuf, scaled);
+    if (ns_display >= 0) {
+        try wr.print("| {s} | {s} | {d:.2} | {s} {s} |\n", .{ label, s_iters, ns_display, s_rate, unit });
+    } else {
+        try wr.print("| {s} | {s} | <0.01 | {s} {s} |\n", .{ label, s_iters, s_rate, unit });
+    }
 }
 
 pub fn main() !void {
@@ -679,6 +786,9 @@ pub fn main() !void {
     try md_append(fbs.getWritten());
 
     std.debug.print("\nSummary written to: {s}\n", .{MD_PATH});
+    // Environment here may have limited disk space; keep extra sections disabled.
+    const ENABLE_EXTRA_SECTIONS = false;
+    if (!ENABLE_EXTRA_SECTIONS) return;
 
     // ---- Additional diagnostic sections ----
 

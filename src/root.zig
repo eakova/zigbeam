@@ -19,6 +19,6 @@ pub const Utils = struct {
     pub const Arc = arc.Arc;
     pub const ArcWeak = arc.ArcWeak;
     pub const ArcPool = arc_pool.ArcPool;
-    pub const ArcPoolWithCapacity = arc_pool.ArcPoolWithCapacity;
+    // ArcPoolWithCapacity was removed in favor of ArcPool + Options
     pub const ArcCycleDetector = arc_cycle_detector.ArcCycleDetector;
 };

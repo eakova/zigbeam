@@ -89,6 +89,9 @@ pub fn ArcPool(comptime T: type, comptime EnableStats: bool) type {
         pub const Options = struct {
             /// Override detected logical CPU count used to size shard count.
             logical_cpus: ?usize = null,
+            /// Override effective TLS capacity (<= 64). When null, a heuristic
+            /// based on shard count and Inner size is used.
+            tls_active_capacity: ?usize = null,
         };
 
         /// Pick a shard index for the current thread.
@@ -119,10 +122,13 @@ pub fn ArcPool(comptime T: type, comptime EnableStats: bool) type {
         pub fn init(allocator: Allocator, opts: Options) Self {
             // Helper to compute effective TLS capacity (kept here for easy future tuning).
             const computeTlsCapacity = struct {
+                // Safer heuristic: prefer smaller TLS caches to bound retention.
+                // - Size-based cap: 32 for small inner blocks, then 16/8 for larger.
+                // - Shard-based cap: 32 for >=16 shards, 16 for >=8, else 8.
                 fn run(shards: usize) usize {
                     const inner_sz = @sizeOf(InnerType);
-                    const cap_by_size: usize = if (inner_sz <= 64) 64 else if (inner_sz <= 128) 32 else if (inner_sz <= 256) 16 else 8;
-                    const cap_by_shards: usize = if (shards >= 16) 64 else if (shards >= 8) 32 else 16;
+                    const cap_by_size: usize = if (inner_sz <= 64) 32 else if (inner_sz <= 128) 16 else if (inner_sz <= 256) 8 else 8;
+                    const cap_by_shards: usize = if (shards >= 16) 32 else if (shards >= 8) 16 else 8;
                     return if (cap_by_size < cap_by_shards) cap_by_size else cap_by_shards;
                 }
             };
@@ -147,8 +153,10 @@ pub fn ArcPool(comptime T: type, comptime EnableStats: bool) type {
             var i: usize = 0;
             while (i < MAX_SHARDS) : (i += 1) s[i] = atomic.Value(?*InnerType).init(null);
 
-            // Choose effective TLS capacity from shard count.
-            const tls_cap_eff: usize = computeTlsCapacity.run(target);
+            // Choose effective TLS capacity: explicit override or heuristic.
+            const tls_cap_eff_raw: usize = if (opts.tls_active_capacity) |v| v else computeTlsCapacity.run(target);
+            // Final clamp for safety in mixed environments.
+            const tls_cap_eff: usize = if (tls_cap_eff_raw > 32) 32 else tls_cap_eff_raw;
             var fb: usize = tls_cap_eff / 4;
             if (fb < 8) fb = 8;
             if (fb > MAX_FLUSH) fb = MAX_FLUSH;
@@ -241,6 +249,8 @@ pub fn ArcPool(comptime T: type, comptime EnableStats: bool) type {
             }
             return null;
         }
+
+        // (pop-batching removed; conservative single-pop kept for stability)
 
         /// Creates a new `Arc<T>`, reusing a recycled object if available.
         /// Fast path create: L1 (TLS) → L2 (sharded freelists) → L3 (allocator).
@@ -497,323 +507,10 @@ pub fn ArcPool(comptime T: type, comptime EnableStats: bool) type {
             defer self.drainThreadCache();
             try body(self, ctx);
         }
+        
     };
 }
-
 /// Convenience alias: default ArcPool with statistics disabled for best performance.
 pub fn ArcPoolDefault(comptime T: type) type {
     return ArcPool(T, false);
-}
-
-/// Variant of ArcPool that allows selecting the TLS capacity for its
-/// per-thread cache at comptime.
-pub fn ArcPoolWithCapacity(comptime T: type, comptime EnableStats: bool, comptime TLSCapacity: usize) type {
-    const InnerType = Arc(T).Inner;
-    return struct {
-        const Self = @This();
-
-        // Define padded counter before fields; Zig 0.15 requires declarations
-        // before container fields inside struct bodies.
-        const PaddedCounter = struct {
-            counter: atomic.Value(u64),
-            _pad: [56]u8 = [_]u8{0} ** 56,
-        };
-
-        const MAX_SHARDS: usize = 32;
-        freelists: [MAX_SHARDS]atomic.Value(?*InnerType),
-        active_shards: usize,
-        flush_batch: usize,
-        allocator: Allocator,
-        alloc_mutex: Thread.Mutex,
-
-        stats_allocs: PaddedCounter align(64),
-        stats_reuses: PaddedCounter align(64),
-        stats_tls_hits: PaddedCounter align(64),
-        stats_tls_miss: PaddedCounter align(64),
-
-        fn recycleToGlobal(pool_context: ?*anyopaque, node: *InnerType) void {
-            const self: *Self = @ptrCast(@alignCast(pool_context.?));
-            self.recycleSlow(node);
-        }
-
-        const Cache = tlc_mod.ThreadLocalCacheWithCapacity(*InnerType, recycleToGlobal, TLSCapacity);
-        threadlocal var tls_cache: Cache = .{};
-        const MAX_FLUSH: usize = 32;
-        const FlushBuf = struct { buf: [MAX_FLUSH]?*InnerType = [_]?*InnerType{null} ** MAX_FLUSH, count: usize = 0 };
-        threadlocal var tls_flush: FlushBuf = .{};
-
-        pub const Options = struct {
-            logical_cpus: ?usize = null,
-        };
-
-        fn shardIndex(self: *const Self) usize { return (@intFromPtr(self) ^ @intFromPtr(&tls_cache)) & (self.active_shards - 1); }
-        fn pushChain(self: *Self, shard: usize, head_node: *InnerType, tail_node: *InnerType) void {
-            var head = self.freelists[shard].load(.monotonic);
-            while (true) {
-                tail_node.next_in_freelist = head;
-                if (self.freelists[shard].cmpxchgWeak(head, head_node, .release, .monotonic)) |new_head| { head = new_head; std.atomic.spinLoopHint(); continue; }
-                break;
-            }
-        }
-
-        pub fn init(allocator: Allocator, opts: Options) Self {
-            // Choose active shards from CPU count (next pow2, clamp [8, MAX_SHARDS])
-            const cpu_raw = std.Thread.getCpuCount() catch 0;
-            const detected = if (cpu_raw == 0) 16 else cpu_raw;
-            const cpu = if (opts.logical_cpus) |n| n else detected;
-            const min_shards: usize = 8;
-            var target: usize = if (cpu < min_shards) min_shards else cpu;
-            if (target > MAX_SHARDS) target = MAX_SHARDS;
-            // ceil to next pow2
-            target -= 1;
-            target |= target >> 1;
-            target |= target >> 2;
-            target |= target >> 4;
-            target |= target >> 8;
-            if (@sizeOf(usize) == 8) target |= target >> 32;
-            target += 1;
-            if (target < min_shards) target = min_shards;
-
-            var s: [MAX_SHARDS]atomic.Value(?*InnerType) = undefined;
-            var i: usize = 0;
-            while (i < MAX_SHARDS) : (i += 1) s[i] = atomic.Value(?*InnerType).init(null);
-
-            var fb: usize = TLSCapacity / 4;
-            if (fb < 8) fb = 8;
-            if (fb > MAX_FLUSH) fb = MAX_FLUSH;
-
-            var instance: Self = .{ .freelists = s, .active_shards = target, .allocator = allocator, .alloc_mutex = .{}, .flush_batch = fb,
-                .stats_allocs = .{ .counter = atomic.Value(u64).init(0) },
-                .stats_reuses = .{ .counter = atomic.Value(u64).init(0) },
-                .stats_tls_hits = .{ .counter = atomic.Value(u64).init(0) },
-                .stats_tls_miss = .{ .counter = atomic.Value(u64).init(0) }, };
-            // Mini pre-seed (single shard): warm a couple nodes.
-            var warm: usize = 0;
-            while (warm < 2) : (warm += 1) {
-                const payload = std.mem.zeroes(T);
-                const arc = Arc(T).init(instance.allocator, payload) catch break;
-                instance.recycle(arc);
-            }
-            instance.drainThreadCache();
-            return instance;
-        }
-
-        pub fn deinit(self: *Self) void {
-            tls_cache.clear(self);
-            if (tls_flush.count > 0) {
-                var i: usize = 0;
-                const first = tls_flush.buf[0].?;
-                var last: *InnerType = first;
-                i = 1;
-                while (i < tls_flush.count) : (i += 1) { const n = tls_flush.buf[i].?; last.next_in_freelist = n; last = n; }
-                const shardf = self.shardIndex();
-                self.pushChain(shardf, first, last);
-                tls_flush.count = 0;
-            }
-            self.alloc_mutex.lock(); defer self.alloc_mutex.unlock();
-            var si: usize = 0;
-            while (si < self.active_shards) : (si += 1) {
-                var current = self.freelists[si].swap(null, .acquire);
-                while (current) |node| { const next = node.next_in_freelist; Arc(T).destroyInnerBlock(node); current = next; }
-            }
-        }
-
-        pub fn create(self: *Self, value: T) !Arc(T) {
-            if (comptime Arc(T).use_svo) return Arc(T).init(self.allocator, value);
-            if (tls_cache.pop()) |node| {
-                if (EnableStats) _ = self.stats_tls_hits.counter.fetchAdd(1, .monotonic);
-                node.counters.strong_count.store(1, .monotonic);
-                node.counters.weak_count.store(0, .monotonic);
-                node.allocator = self.allocator;
-                node.next_in_freelist = null;
-                node.data = value;
-                const tagged = Arc(T).InnerTaggedPtr.new(node, Arc(T).TAG_POINTER) catch unreachable;
-                return Arc(T){ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
-            }
-            if (EnableStats) _ = self.stats_tls_miss.counter.fetchAdd(1, .monotonic);
-
-            var shard = self.shardIndex(); var attempts: usize = 0;
-            while (attempts < self.active_shards) : (attempts += 1) {
-                var head = self.freelists[shard].load(.acquire);
-                while (head) |node| {
-                    const next = node.next_in_freelist;
-                    if (self.freelists[shard].cmpxchgWeak(head, next, .acquire, .monotonic)) |new_head| { head = new_head; std.atomic.spinLoopHint(); continue; }
-                    if (EnableStats) _ = self.stats_reuses.counter.fetchAdd(1, .monotonic);
-                    node.counters.strong_count.store(1, .monotonic);
-                    node.counters.weak_count.store(0, .monotonic);
-                    node.allocator = self.allocator;
-                    node.next_in_freelist = null;
-                    node.data = value;
-                    const tagged = Arc(T).InnerTaggedPtr.new(node, Arc(T).TAG_POINTER) catch unreachable;
-                    return Arc(T){ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
-                }
-                shard = (shard + 1) & (self.active_shards - 1);
-            }
-
-            if (EnableStats) _ = self.stats_allocs.counter.fetchAdd(1, .monotonic);
-            self.alloc_mutex.lock();
-            defer self.alloc_mutex.unlock();
-            return Arc(T).init(self.allocator, value);
-        }
-
-        pub fn createWithInitializer(self: *Self, initializer: *const fn (*T) void) !Arc(T) {
-            if (comptime Arc(T).use_svo) return Arc(T).initWithInitializer(self.allocator, initializer);
-            if (tls_cache.pop()) |node| {
-                if (EnableStats) _ = self.stats_tls_hits.counter.fetchAdd(1, .monotonic);
-                node.counters.strong_count.store(1, .monotonic);
-                node.counters.weak_count.store(0, .monotonic);
-                node.allocator = self.allocator;
-                node.next_in_freelist = null;
-                initializer(&node.data);
-                const tagged = Arc(T).InnerTaggedPtr.new(node, Arc(T).TAG_POINTER) catch unreachable;
-                return Arc(T){ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
-            }
-            if (EnableStats) _ = self.stats_tls_miss.counter.fetchAdd(1, .monotonic);
-            var shard_c = self.shardIndex();
-            var attempts_c: usize = 0;
-            while (attempts_c < self.active_shards) : (attempts_c += 1) {
-                var head = self.freelists[shard_c].load(.acquire);
-                while (head) |node| {
-                    const next = node.next_in_freelist;
-                    if (self.freelists[shard_c].cmpxchgWeak(head, next, .acquire, .monotonic)) |new_head| { head = new_head; std.atomic.spinLoopHint(); continue; }
-                    if (EnableStats) _ = self.stats_reuses.counter.fetchAdd(1, .monotonic);
-                    node.counters.strong_count.store(1, .monotonic);
-                    node.counters.weak_count.store(0, .monotonic);
-                    node.allocator = self.allocator;
-                    node.next_in_freelist = null;
-                    initializer(&node.data);
-                    const tagged = Arc(T).InnerTaggedPtr.new(node, Arc(T).TAG_POINTER) catch unreachable;
-                    return Arc(T){ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
-                }
-                shard_c = (shard_c + 1) & (self.active_shards - 1);
-            }
-            if (EnableStats) _ = self.stats_allocs.counter.fetchAdd(1, .monotonic);
-            self.alloc_mutex.lock(); defer self.alloc_mutex.unlock();
-            return Arc(T).initWithInitializer(self.allocator, initializer);
-        }
-
-        pub fn createWithInitializerFallible(self: *Self, initializer: *const fn (*T) anyerror!void) !Arc(T) {
-            if (comptime Arc(T).use_svo) return Arc(T).initWithInitializerFallible(self.allocator, initializer);
-            if (tls_cache.pop()) |node| {
-                if (EnableStats) _ = self.stats_tls_hits.counter.fetchAdd(1, .monotonic);
-                node.counters.strong_count.store(1, .monotonic);
-                node.counters.weak_count.store(0, .monotonic);
-                node.allocator = self.allocator;
-                node.next_in_freelist = null;
-                if (initializer(&node.data)) |_| {
-                    const tagged = Arc(T).InnerTaggedPtr.new(node, Arc(T).TAG_POINTER) catch unreachable;
-                    return Arc(T){ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
-                } else |e| {
-                    self.recycleSlow(node);
-                    return e;
-                }
-            }
-            if (EnableStats) _ = self.stats_tls_miss.counter.fetchAdd(1, .monotonic);
-            var shard_d = self.shardIndex();
-            var attempts_d: usize = 0;
-            while (attempts_d < self.active_shards) : (attempts_d += 1) {
-                var head = self.freelists[shard_d].load(.acquire);
-                while (head) |node| {
-                    const next = node.next_in_freelist;
-                    if (self.freelists[shard_d].cmpxchgWeak(head, next, .acquire, .monotonic)) |new_head| { head = new_head; std.atomic.spinLoopHint(); continue; }
-                    if (EnableStats) _ = self.stats_reuses.counter.fetchAdd(1, .monotonic);
-                    node.counters.strong_count.store(1, .monotonic);
-                    node.counters.weak_count.store(0, .monotonic);
-                    node.allocator = self.allocator;
-                    node.next_in_freelist = null;
-                    if (initializer(&node.data)) |_| {
-                        const tagged = Arc(T).InnerTaggedPtr.new(node, Arc(T).TAG_POINTER) catch unreachable;
-                        return Arc(T){ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
-                    } else |e| {
-                        self.recycleSlow(node);
-                        return e;
-                    }
-                }
-                shard_d = (shard_d + 1) & (self.active_shards - 1);
-            }
-            if (EnableStats) _ = self.stats_allocs.counter.fetchAdd(1, .monotonic);
-            self.alloc_mutex.lock(); defer self.alloc_mutex.unlock();
-            return Arc(T).initWithInitializerFallible(self.allocator, initializer);
-        }
-
-        /// Create a cyclic Arc via pool using a constructor that receives a temporary Weak.
-        pub fn createCyclic(self: *Self, ctor: *const fn (Arc(T).ArcWeak(T)) anyerror!T) !Arc(T) {
-            return self.createCyclicWithOptions(ctor, .{});
-        }
-
-        pub fn createCyclicWithOptions(self: *Self, ctor: *const fn (Arc(T).ArcWeak(T)) anyerror!T, opts: Arc(T).CyclicOptions) !Arc(T) {
-            if (comptime Arc(T).use_svo) {
-                @compileError("ArcPool.createCyclic requires heap Arc; SVO is not supported");
-            }
-            const o: Arc(T).CyclicOptions = opts;
-            if (tls_cache.pop()) |node| {
-                if (EnableStats) _ = self.stats_tls_hits.counter.fetchAdd(1, .monotonic);
-                node.counters.strong_count.store(1, .monotonic);
-                node.counters.weak_count.store(1, .monotonic);
-                node.allocator = self.allocator;
-                node.next_in_freelist = null;
-                node.auto_call_deinit = o.auto_call_deinit;
-                node.on_drop = o.on_drop;
-                var weak = Arc(T).ArcWeak(T){ .inner = node };
-                const val = ctor(weak) catch |e| { self.recycleSlow(node); return e; };
-                node.data = val;
-                weak.release();
-                const tagged = Arc(T).InnerTaggedPtr.new(node, Arc(T).TAG_POINTER) catch unreachable;
-                return Arc(T){ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
-            }
-            if (EnableStats) _ = self.stats_tls_miss.counter.fetchAdd(1, .monotonic);
-            var shard_e = self.shardIndex();
-            var attempts_e: usize = 0;
-            while (attempts_e < self.active_shards) : (attempts_e += 1) {
-                var head = self.freelists[shard_e].load(.acquire);
-                while (head) |node| {
-                    const next = node.next_in_freelist;
-                    if (self.freelists[shard_e].cmpxchgWeak(head, next, .acquire, .monotonic)) |new_head| { head = new_head; std.atomic.spinLoopHint(); continue; }
-                    if (EnableStats) _ = self.stats_reuses.counter.fetchAdd(1, .monotonic);
-                    node.counters.strong_count.store(1, .monotonic);
-                    node.counters.weak_count.store(1, .monotonic);
-                    node.allocator = self.allocator;
-                    node.next_in_freelist = null;
-                    node.auto_call_deinit = o.auto_call_deinit;
-                    node.on_drop = o.on_drop;
-                    var weak = Arc(T).ArcWeak(T){ .inner = node };
-                    const val = ctor(weak) catch |e| { self.recycleSlow(node); return e; };
-                    node.data = val;
-                    weak.release();
-                    const tagged = Arc(T).InnerTaggedPtr.new(node, Arc(T).TAG_POINTER) catch unreachable;
-                    return Arc(T){ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
-                }
-                shard_e = (shard_e + 1) & (self.active_shards - 1);
-            }
-            if (EnableStats) _ = self.stats_allocs.counter.fetchAdd(1, .monotonic);
-            self.alloc_mutex.lock(); defer self.alloc_mutex.unlock();
-            return Arc(T).newCyclicWithOptions(self.allocator, ctor, o);
-        }
-
-        pub fn recycle(self: *Self, arc: Arc(T)) void {
-            if (arc.isInline()) return;
-            if (tls_cache.push(arc.asPtr())) return;
-            self.recycleSlow(arc.asPtr());
-        }
-
-        pub fn recycleSlow(self: *Self, node: *InnerType) void {
-            const idx0 = tls_flush.count;
-            if (idx0 < self.flush_batch) {
-                tls_flush.buf[idx0] = node;
-                tls_flush.count = idx0 + 1;
-                // Early flush: flush_batch-2 eşiğinde boşalt.
-                if (tls_flush.count < self.flush_batch - 2) return;
-            }
-            var i: usize = 0; const first = tls_flush.buf[0].?; var last: *InnerType = first; i = 1;
-            while (i < tls_flush.count) : (i += 1) { const n = tls_flush.buf[i].?; last.next_in_freelist = n; last = n; }
-            const shardb = self.shardIndex(); self.pushChain(shardb, first, last); tls_flush.count = 0;
-        }
-
-        pub fn drainThreadCache(self: *Self) void { tls_cache.clear(self); if (tls_flush.count > 0) { var i: usize = 0; const first = tls_flush.buf[0].?; var last: *InnerType = first; i = 1; while (i < tls_flush.count) : (i += 1) { const n = tls_flush.buf[i].?; last.next_in_freelist = n; last = n; } const shardf = self.shardIndex(); self.pushChain(shardf, first, last); tls_flush.count = 0; } }
-
-        pub fn withThreadCache(self: *Self, body: fn (*Self, *anyopaque) anyerror!void, ctx: *anyopaque) !void {
-            defer self.drainThreadCache();
-            try body(self, ctx);
-        }
-    };
 }

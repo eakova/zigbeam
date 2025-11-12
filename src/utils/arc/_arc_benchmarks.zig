@@ -28,6 +28,9 @@ const MIN_MT_THREADS: usize = 2;
 const MAX_MT_THREADS: usize = 16;
 
 const MD_PATH = "docs/utils/arc_benchmark_results.md";
+// Iteration-based cap per scenario (total across threads).
+// For a given threads count N, each thread runs roughly MAX_TOTAL_ITERS / N iterations.
+const MAX_TOTAL_ITERS: u64 = 250_000_000;
 
 fn write_md_truncate(content: []const u8) !void {
     var file = try std.fs.cwd().createFile(MD_PATH, .{ .truncate = true });
@@ -276,10 +279,9 @@ fn detectThreadCount() usize {
 // This test measures the raw, best-case performance of `clone` and `release`
 // operations without any cross-thread contention. It establishes the baseline
 // overhead of the reference counting mechanism.
-var global_gpa = std.heap.GeneralPurposeAllocator(.{}){};
-
 fn getAllocator() std.mem.Allocator {
-    return global_gpa.allocator();
+    // Use libc malloc/free for peak allocation throughput in benches.
+    return std.heap.c_allocator;
 }
 
 fn benchCloneReleaseType(comptime T: type, value: T, target_ms: u64, repeats: usize) !struct { stats: Stats, iterations: u64 } {
@@ -316,14 +318,15 @@ fn benchCloneReleaseType(comptime T: type, value: T, target_ms: u64, repeats: us
     return .{ .stats = stats, .iterations = run_iters };
 }
 
-pub fn run_single(mt_threads: usize) !void {
+pub fn run_single(_: usize) !void {
     const allocator = getAllocator();
     // quick-mode params
     const target_ms_st: u64 = 300;
     const warmups: usize = 0;
     const repeats: usize = 2;
     // Pilot
-    var arc_pilot = try ArcU64.init(allocator, 123);
+    // Use a heap-backed Arc payload to avoid SVO and ensure measurable work.
+    var arc_pilot = try ArcArray64.init(allocator, [_]u8{1} ** 64);
     defer arc_pilot.release();
     var t0 = try Timer.start();
     var i: u64 = 0;
@@ -337,7 +340,7 @@ pub fn run_single(mt_threads: usize) !void {
     var stats = Stats{};
     var w: usize = 0;
     while (w < warmups) : (w += 1) {
-        var arc_w = try ArcU64.init(allocator, 123);
+        var arc_w = try ArcArray64.init(allocator, [_]u8{1} ** 64);
         defer arc_w.release();
         var t = try Timer.start();
         i = 0;
@@ -349,7 +352,7 @@ pub fn run_single(mt_threads: usize) !void {
     }
     var rep: usize = 0;
     while (rep < repeats) : (rep += 1) {
-        var arc = try ArcU64.init(allocator, 123);
+        var arc = try ArcArray64.init(allocator, [_]u8{1} ** 64);
         defer arc.release();
         var timer = try Timer.start();
         i = 0;
@@ -361,55 +364,10 @@ pub fn run_single(mt_threads: usize) !void {
         record(&stats, run_iters, ns);
     }
 
-    // Header, Legend, Config, Machine
-    var header_buf: [2048]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&header_buf);
-    const wr = fbs.writer();
-    const builtin = @import("builtin");
-    const os_tag = @tagName(builtin.os.tag);
-    const arch_tag = @tagName(builtin.cpu.arch);
-    const mode_tag = @tagName(builtin.mode);
-    const ptr_bits: usize = @sizeOf(usize) * 8;
-    const zig_ver = builtin.zig_version_string;
-    const cpu_count = std.Thread.getCpuCount() catch 0;
-    try wr.print(
-        "# ARC Benchmark Results\n\n" ++
-            "## Legend\n" ++
-            "- Iterations: number of clone+release pairs per measured run.\n" ++
-            "- ns/op: latency per pair (lower is better).\n" ++
-            "- ops/s: pairs per second (higher is better).\n\n" ++
-            "## Config\n" ++
-            "- iterations: {d}\n" ++
-            "- threads (MT): {d}\n\n" ++
-            "## Machine\n" ++
-            "- OS: {s}\n- Arch: {s}\n- Zig: {s}\n- Build Mode: {s}\n- Pointer Width: {}-bit\n- Logical CPUs: {}\n\n",
-        .{ run_iters, mt_threads, os_tag, arch_tag, zig_ver, mode_tag, ptr_bits, cpu_count },
-    );
-    try wr.print("## Arc — Single-Threaded\n", .{});
-    const med = medianIqr(stats.ns_per_list[0..stats.len]);
-    const thr = medianIqr(stats.ops_s_list[0..stats.len]);
-    var nb: [32]u8 = undefined;
-    var nb2: [32]u8 = undefined;
-    var nb3: [32]u8 = undefined;
-    var nb4: [32]u8 = undefined;
-    const s_iters = fmt_u64_commas(&nb, run_iters);
-    const s_ns_med = fmt_u64_commas(&nb2, med.median);
-    const s_ops = fmt_u64_commas(&nb3, thr.median);
-    const s_ops_h = fmt_rate_human(&nb4, thr.median);
-    try wr.print("- Iterations: {s}\n", .{s_iters});
-    try wr.print("- Latency (ns/op) median (IQR): {s} ({d}–{d})\n", .{ s_ns_med, med.q1, med.q3 });
-    try wr.print("- Throughput: {s} (≈ {s} {s})\n\n", .{ s_ops, s_ops_h, unit_suffix(thr.median) });
-    try write_md_truncate(fbs.getWritten());
-    // Console summary
-    var f64buf: [32]u8 = undefined;
-    const approx_ns = fmt_ns_from_ops(&f64buf, thr.median);
-    std.debug.print(
-        "ARC ST  iters={}  ns/op={} ({}–{})  ops/s={}  (~{s} ns/op)\n",
-        .{ run_iters, med.median, med.q1, med.q3, thr.median, approx_ns },
-    );
-    const f_ns = medianIqrNsPerOpF64(&stats);
-    const f_ops = medianIqrOpsPerSecF64(&stats);
-    std.debug.print("ARC ST (f64)  ns/op={d:.2}  ops/s={d:.2}\n", .{ f_ns.median, f_ops.median });
+    // Only write requested tables (truncate file first)
+    try write_md_truncate("");
+    try run_arc_scaling_tables();
+    try run_arc_downgrade_tables();
 }
 
 // # Multi-Threaded Benchmark
@@ -431,9 +389,10 @@ const PoolPayloadLen = 64;
 const PoolTypeOn = ArcPoolModule.ArcPool(PoolPayload, true);
 const PoolTypeOff = ArcPoolModule.ArcPool(PoolPayload, false);
 const PoolOff8 = ArcPoolModule.ArcPool(PoolPayload, false);
-const PoolOff16 = ArcPoolModule.ArcPoolWithCapacity(PoolPayload, false, 16);
-const PoolOff32 = ArcPoolModule.ArcPoolWithCapacity(PoolPayload, false, 32);
-const PoolOff64 = ArcPoolModule.ArcPoolWithCapacity(PoolPayload, false, 64);
+// Capacity variants now use ArcPool + Options (runtime tls_active_capacity)
+const PoolOff16 = PoolTypeOff;
+const PoolOff32 = PoolTypeOff;
+const PoolOff64 = PoolTypeOff;
 
 const PoolWorkerCtxOn = struct {
     pool: *PoolTypeOn,
@@ -543,42 +502,216 @@ fn benchMultiCloneRelease(
     return .{ .stats = stats, .total_pairs = total_iters, .per_thread = per_thread_iters };
 }
 
-pub fn run_multi(thread_count: usize) !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+fn benchMultiCloneReleaseType(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    threads: usize,
+    value: T,
+    _: u64,
+) !struct { stats: Stats, total_pairs: u64, per_thread: u64 } {
+    const ArcType = beam.Utils.Arc(T);
+    var per_thread_iters: u64 = 1;
+    if (threads > 0) {
+        // Divide total budget across threads; ensure at least 1 iteration per thread.
+        const div = MAX_TOTAL_ITERS / @as(u64, threads);
+        per_thread_iters = if (div == 0) 1 else div;
+    }
+    const Ctx = struct { shared_arc: *const ArcType, iterations: u64 };
+    const Worker = struct {
+        fn run(ctx: *Ctx) void {
+            var i: u64 = 0;
+            while (i < ctx.iterations) : (i += 1) {
+                const c = ctx.shared_arc.*.clone();
+                c.release();
+            }
+        }
+    };
 
-    const result = try benchMultiCloneRelease(allocator, thread_count, 150, 2);
-    const med = medianIqr(result.stats.ns_per_list[0..result.stats.len]);
-    const thr = medianIqr(result.stats.ops_s_list[0..result.stats.len]);
+    var stats = Stats{};
+    var shared_arc = try ArcType.init(allocator, value);
+    defer shared_arc.release();
+    const handles = try allocator.alloc(Thread, threads);
+    defer allocator.free(handles);
+    const contexts = try allocator.alloc(Ctx, threads);
+    defer allocator.free(contexts);
+    var idx: usize = 0;
+    while (idx < threads) : (idx += 1) {
+        contexts[idx] = .{ .shared_arc = &shared_arc, .iterations = per_thread_iters };
+        handles[idx] = try Thread.spawn(.{}, Worker.run, .{ &contexts[idx] });
+    }
+    var timer = try Timer.start();
+    for (handles) |h| h.join();
+    const ns = timer.read();
+    const total_ops: u64 = per_thread_iters * @as(u64, threads);
+    record(&stats, total_ops, ns);
+    return .{ .stats = stats, .total_pairs = total_ops, .per_thread = per_thread_iters };
+}
 
+fn writeArcRowNoVariant(wr: anytype, threads: usize, iterations: u64, stats: Stats) !void {
     var nb1: [32]u8 = undefined;
+    const s_thr = fmt_u64_commas(&nb1, threads);
     var nb2: [32]u8 = undefined;
-    var nb3: [32]u8 = undefined;
-    var nb4: [32]u8 = undefined;
-    var nb5: [32]u8 = undefined;
-    const s_iters = fmt_u64_commas(&nb1, result.per_thread);
-    const s_total = fmt_u64_commas(&nb2, result.total_pairs);
-    const s_ns = fmt_u64_commas(&nb3, med.median);
-    const s_ops = fmt_u64_commas(&nb4, thr.median);
-    const ops_h = fmt_rate_human(&nb5, thr.median);
+    const s_iters = fmt_u64_commas(&nb2, iterations);
+    const nsf = medianIqrNsPerOpF64(&stats);
+    const opsf = medianIqrOpsPerSecF64(&stats);
+    const ns_display = if (nsf.median > 0.009) nsf.median else -1.0;
+    var scaled: f64 = 0; const unit = scale_rate_f64(&scaled, opsf.median);
+    var fbuf: [48]u8 = undefined; const s_rate = fmt_f64_commas2(&fbuf, scaled);
+    if (ns_display >= 0) {
+        try wr.print("| {s} | {s} | {d:.2} | {s} {s} |\n", .{ s_thr, s_iters, ns_display, s_rate, unit });
+    } else {
+        try wr.print("| {s} | {s} | <0.01 | {s} {s} |\n", .{ s_thr, s_iters, s_rate, unit });
+    }
+}
 
-    var f64buf2: [32]u8 = undefined;
-    const approx_ns_mt = fmt_ns_from_ops(&f64buf2, thr.median);
-    std.debug.print(
-        "ARC MT  threads={} iters/thread={} total_pairs={} ns/op={} ({}–{})  ops/s={}  (~{s} ns/op)\n",
-        .{ thread_count, result.per_thread, result.total_pairs, med.median, med.q1, med.q3, thr.median, approx_ns_mt },
-    );
+fn run_arc_scaling_tables() !void {
+    const allocator = getAllocator();
+    // Note: 16-thread rows temporarily disabled to keep runs shorter.
+    // const threads_list_all = [_]usize{1,4,8,16};
+    const threads_list = [_]usize{1,4,8};
+    // Iteration-capped mode: no env/time knobs are used.
+    const target_ms: u64 = 0;
 
-    var buf: [512]u8 = undefined;
+    // Simple Value Object (SVO)
+    // Capture results to reuse in the Clone Throughput table without re-running.
+    var svo_iters: [4]u64 = .{0} ** 4;
+    var svo_stats: [4]Stats = .{ .{}, .{}, .{}, .{} };
+    var buf1: [768]u8 = undefined; var fbs1 = std.io.fixedBufferStream(&buf1); const wr1 = fbs1.writer();
+    try wr1.print("### Arc - SVO- (u32)\n", .{});
+    try wr1.print("| Thread(s) |  Iterations | ns/op (median) | Throughput (ops/s) |\n| --- | --- | --- | --- |\n", .{});
+    for (threads_list, 0..) |tc, idx| {
+        const res = try benchMultiCloneReleaseType(u32, allocator, tc, 123, target_ms);
+        svo_iters[idx] = MAX_TOTAL_ITERS;
+        svo_stats[idx] = res.stats;
+        try writeArcRowNoVariant(wr1, tc, MAX_TOTAL_ITERS, res.stats);
+    }
+    try wr1.print("\n", .{});
+    try write_md_append(fbs1.getWritten());
+
+    // Heap ([64]u8)
+    // Capture results to reuse in the Clone Throughput table without re-running.
+    var heap_iters: [4]u64 = .{0} ** 4;
+    var heap_stats: [4]Stats = .{ .{}, .{}, .{}, .{} };
+    var buf2: [768]u8 = undefined; var fbs2 = std.io.fixedBufferStream(&buf2); const wr2 = fbs2.writer();
+    try wr2.print("### Arc - Heap - ([64]u8)\n", .{});
+    try wr2.print("| Thread(s) |  Iterations | ns/op (median) | Throughput (ops/s) |\n| --- | --- | --- | --- |\n", .{});
+    for (threads_list, 0..) |tc, idx| {
+        const res = try benchMultiCloneReleaseType([64]u8, allocator, tc, [_]u8{7} ** 64, target_ms);
+        heap_iters[idx] = MAX_TOTAL_ITERS;
+        heap_stats[idx] = res.stats;
+        try writeArcRowNoVariant(wr2, tc, MAX_TOTAL_ITERS, res.stats);
+    }
+    try wr2.print("\n", .{});
+    try write_md_append(fbs2.getWritten());
+
+    // Clone Throughput (SVO)
+    var buf3: [768]u8 = undefined; var fbs3 = std.io.fixedBufferStream(&buf3); const wr3 = fbs3.writer();
+    try wr3.print("### Arc - SVO Clone Throughput - (u32)\n", .{});
+    try wr3.print("| Thread(s) |  Iterations | ns/op (median) | Throughput (ops/s) |\n| --- | --- | --- | --- |\n", .{});
+    // Reuse results from SVO table (no re-bench)
+    for (threads_list, 0..) |tc, idx| {
+        try writeArcRowNoVariant(wr3, tc, svo_iters[idx], svo_stats[idx]);
+    }
+    try wr3.print("\n", .{});
+    try write_md_append(fbs3.getWritten());
+
+    // Clone Throughput (Heap)
+    var buf4: [768]u8 = undefined; var fbs4 = std.io.fixedBufferStream(&buf4); const wr4 = fbs4.writer();
+    try wr4.print("### Arc - Heap Clone Throughput - ([64]u8)\n", .{});
+    try wr4.print("| Thread(s) |  Iterations | ns/op (median) | Throughput (ops/s) |\n| --- | --- | --- | --- |\n", .{});
+    for (threads_list, 0..) |tc, idx| {
+        try writeArcRowNoVariant(wr4, tc, heap_iters[idx], heap_stats[idx]);
+    }
+    try wr4.print("\n", .{});
+    try write_md_append(fbs4.getWritten());
+}
+
+fn benchMultiDowngradeUpgradeType(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    threads: usize,
+    value: T,
+    _: u64,
+) !struct { stats: Stats, total_pairs: u64 } {
+    const ArcType = beam.Utils.Arc(T);
+    var per_thread_iters: u64 = 1;
+    if (threads > 0) {
+        const div = MAX_TOTAL_ITERS / @as(u64, threads);
+        per_thread_iters = if (div == 0) 1 else div;
+    }
+    const Ctx = struct { shared: *ArcType, iterations: u64 };
+    const Worker = struct {
+        fn run(ctx: *Ctx) void {
+            var i: u64 = 0;
+            while (i < ctx.iterations) : (i += 1) {
+                if (ctx.shared.downgrade()) |weak| {
+                    if (weak.upgrade()) |tmp| tmp.release();
+                    weak.release();
+                }
+            }
+        }
+    };
+    var stats = Stats{};
+    var shared = try ArcType.init(allocator, value); defer shared.release();
+    const handles = try allocator.alloc(Thread, threads); defer allocator.free(handles);
+    const ctxs = try allocator.alloc(Ctx, threads); defer allocator.free(ctxs);
+    var k: usize = 0; while (k < threads) : (k += 1) { ctxs[k] = .{ .shared = &shared, .iterations = per_thread_iters }; handles[k] = try Thread.spawn(.{}, Worker.run, .{ &ctxs[k] }); }
+    var t = try Timer.start(); for (handles) |h| h.join(); const ns = t.read();
+    const total_ops: u64 = per_thread_iters * @as(u64, threads);
+    record(&stats, total_ops, ns);
+    return .{ .stats = stats, .total_pairs = total_ops };
+}
+
+fn run_arc_downgrade_tables() !void {
+    const allocator = getAllocator();
+    // Note: 16-thread rows temporarily disabled to keep runs shorter.
+    // const threads_list_all = [_]usize{1,4,8,16};
+    const threads_list = [_]usize{1,4,8};
+    const target_ms: u64 = 0; // iteration-capped mode
+
+    var b1: [768]u8 = undefined; var s1 = std.io.fixedBufferStream(&b1); const w1 = s1.writer();
+    try w1.print("### Arc - SVO Downgrade + Upgrade Throughput - (u32)\n", .{});
+    try w1.print("| Thread(s) |  Iterations | ns/op (median) | Throughput (ops/s) |\n| --- | --- | --- | --- |\n", .{});
+    for (threads_list) |tc| { const r = try benchMultiDowngradeUpgradeType(u32, allocator, tc, 123, target_ms); try writeArcRowNoVariant(w1, tc, MAX_TOTAL_ITERS, r.stats); }
+    try w1.print("\n", .{}); try write_md_append(s1.getWritten());
+
+    var b2: [768]u8 = undefined; var s2 = std.io.fixedBufferStream(&b2); const w2 = s2.writer();
+    try w2.print("### Arc - Heap Downgrade + Upgrade Throughput - ([64]u8)\n", .{});
+    try w2.print("| Thread(s) |  Iterations | ns/op (median) | Throughput (ops/s) |\n| --- | --- | --- | --- |\n", .{});
+    for (threads_list) |tc| { const r = try benchMultiDowngradeUpgradeType([64]u8, allocator, tc, [_]u8{7} ** 64, target_ms); try writeArcRowNoVariant(w2, tc, MAX_TOTAL_ITERS, r.stats); }
+    try w2.print("\n", .{}); try write_md_append(s2.getWritten());
+}
+
+pub fn run_multi(thread_count: usize) !void {
+    const allocator = getAllocator();
+    const mt_svo = try benchMultiCloneReleaseType(u32, allocator, thread_count, 123, 0);
+    const mt_heap = try benchMultiCloneReleaseType([64]u8, allocator, thread_count, [_]u8{5} ** 64, 0);
+
+    var buf: [1024]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const w = fbs.writer();
-    try w.print("## Arc — Multi-Threaded ({d} threads)\n", .{thread_count});
-    try w.print("- iters/thread: {s}\n", .{s_iters});
-    try w.print("- total pairs: {s}\n", .{s_total});
-    try w.print("- ns/op median (IQR): {s} ({d}–{d})\n", .{ s_ns, med.q1, med.q3 });
-    try w.print("- ops/s median: {s} (≈ {s} {s})\n\n", .{ s_ops, ops_h, unit_suffix(thr.median) });
+    try w.print("### Arc — 4 threads - SVO\n", .{});
+    try w.print("| Variant | Iterations | ns/op (median) | Throughput (ops/s) |\n| --- | --- | --- | --- |\n", .{});
+    try writeBenchRow(w, "SVO (u32)", mt_svo.total_pairs, mt_svo.stats);
+    try w.print("\n", .{});
+    try w.print("### Arc — 4 threads - Heap\n", .{});
+    try w.print("| Variant | Iterations | ns/op (median) | Throughput (ops/s) |\n| --- | --- | --- | --- |\n", .{});
+    try writeBenchRow(w, "Heap ([64]u8)", mt_heap.total_pairs, mt_heap.stats);
+    try w.print("\n", .{});
+    try w.print("### Arc — 4 threads  - SVO vs Heap Clone Throughput\n", .{});
+    try w.print("| Variant | Iterations | ns/op (median) | Throughput (ops/s) |\n| --- | --- | --- | --- |\n", .{});
+    try writeBenchRow(w, "SVO (u32)", mt_svo.total_pairs, mt_svo.stats);
+    try writeBenchRow(w, "Heap ([64]u8)", mt_heap.total_pairs, mt_heap.stats);
+    try w.print("\n", .{});
     try write_md_append(fbs.getWritten());
+
+    // Console summaries
+    const f_mt_ns_s = medianIqrNsPerOpF64(&mt_svo.stats);
+    const f_mt_ops_s = medianIqrOpsPerSecF64(&mt_svo.stats);
+    std.debug.print("ARC MT (SVO, f64)  ns/op={d:.2}  ops/s={d:.2}\n", .{ f_mt_ns_s.median, f_mt_ops_s.median });
+    const f_mt_ns_h = medianIqrNsPerOpF64(&mt_heap.stats);
+    const f_mt_ops_h = medianIqrOpsPerSecF64(&mt_heap.stats);
+    std.debug.print("ARC MT (Heap, f64)  ns/op={d:.2}  ops/s={d:.2}\n", .{ f_mt_ns_h.median, f_mt_ops_h.median });
 }
 
 fn benchDowngradeUpgrade(comptime T: type, value: T, target_ms: u64, repeats: usize) !struct { stats: Stats, iterations: u64 } {
@@ -790,7 +923,8 @@ fn writeBenchRow(wr: anytype, label: []const u8, iterations: u64, stats: Stats) 
 }
 
 pub fn run_svo_vs_heap() !void {
-    const inline_result = try benchCloneReleaseType(u32, 123, 60, 2);
+    // Use a longer target for SVO to avoid timer granularity artifacts
+    const inline_result = try benchCloneReleaseType(u32, 123, 1000, 2);
     const heap_result = try benchCloneReleaseType([64]u8, [_]u8{7} ** 64, 60, 2);
 
     var buf: [1024]u8 = undefined;
@@ -806,11 +940,14 @@ pub fn run_svo_vs_heap() !void {
     try write_md_append(fbs.getWritten());
 
     // Console throughput summary
-    const thr_inline = medianIqr(inline_result.stats.ops_s_list[0..inline_result.stats.len]);
-    const thr_heap = medianIqr(heap_result.stats.ops_s_list[0..heap_result.stats.len]);
-    var hb1: [32]u8 = undefined; var hb2: [32]u8 = undefined;
+    const f_thr_inline = medianIqrOpsPerSecF64(&inline_result.stats);
+    const f_thr_heap = medianIqrOpsPerSecF64(&heap_result.stats);
+    var scaled_a: f64 = 0; var scaled_b: f64 = 0;
+    const unit_a = scale_rate_f64(&scaled_a, f_thr_inline.median);
+    const unit_b = scale_rate_f64(&scaled_b, f_thr_heap.median);
+    var fb1: [48]u8 = undefined; var fb2: [48]u8 = undefined;
     std.debug.print("SVO vs Heap throughput: SVO={s} {s}, Heap={s} {s}\n",
-        .{ fmt_rate_human(&hb1, thr_inline.median), unit_suffix(thr_inline.median), fmt_rate_human(&hb2, thr_heap.median), unit_suffix(thr_heap.median) });
+        .{ fmt_f64_commas2(&fb1, scaled_a), unit_a, fmt_f64_commas2(&fb2, scaled_b), unit_b });
 }
 
 pub fn run_downgrade_upgrade() !void {
@@ -820,7 +957,7 @@ pub fn run_downgrade_upgrade() !void {
     var fbs = std.io.fixedBufferStream(&buf);
     const wr = fbs.writer();
 
-    try wr.print("## Arc — Downgrade + Upgrade\n", .{});
+    try wr.print("### Arc — Downgrade + Upgrade\n", .{});
     try wr.print("| Operation | Iterations | ns/op (median) | Throughput (ops/s) |\n", .{});
     try wr.print("| --- | --- | --- | --- |\n", .{});
     try writeBenchRow(wr, "downgrade+upgrade", result.iterations, result.stats);
@@ -828,9 +965,10 @@ pub fn run_downgrade_upgrade() !void {
     try write_md_append(fbs.getWritten());
 
     // Console throughput summary
-    const thr_du = medianIqr(result.stats.ops_s_list[0..result.stats.len]);
-    var rb1: [32]u8 = undefined;
-    std.debug.print("Downgrade+Upgrade throughput: {s} {s}\n", .{ fmt_rate_human(&rb1, thr_du.median), unit_suffix(thr_du.median) });
+    const f_thr_du = medianIqrOpsPerSecF64(&result.stats);
+    var scaled_du: f64 = 0; const unit_du = scale_rate_f64(&scaled_du, f_thr_du.median);
+    var fbuf_du: [48]u8 = undefined;
+    std.debug.print("Downgrade+Upgrade throughput: {s} {s}\n", .{ fmt_f64_commas2(&fbuf_du, scaled_du), unit_du });
 }
 
 /// Compare raw heap allocations vs ArcPool reuse (single-threaded).
@@ -854,11 +992,14 @@ pub fn run_pool_churn() !void {
     try write_md_append(fbs.getWritten());
 
     // Console throughput summary
-    const thr_raw = medianIqr(raw_result.stats.ops_s_list[0..raw_result.stats.len]);
-    const thr_pool = medianIqr(pool_result.stats.ops_s_list[0..pool_result.stats.len]);
-    var pb1: [32]u8 = undefined; var pb2: [32]u8 = undefined;
+    const f_thr_raw = medianIqrOpsPerSecF64(&raw_result.stats);
+    const f_thr_pool = medianIqrOpsPerSecF64(&pool_result.stats);
+    var scaled_r: f64 = 0; var scaled_p: f64 = 0;
+    const unit_r = scale_rate_f64(&scaled_r, f_thr_raw.median);
+    const unit_p = scale_rate_f64(&scaled_p, f_thr_pool.median);
+    var fb_r: [48]u8 = undefined; var fb_p: [48]u8 = undefined;
     std.debug.print("Heap vs ArcPool (ST) throughput: heap={s} {s}, pool={s} {s}\n",
-        .{ fmt_rate_human(&pb1, thr_raw.median), unit_suffix(thr_raw.median), fmt_rate_human(&pb2, thr_pool.median), unit_suffix(thr_pool.median) });
+        .{ fmt_f64_commas2(&fb_r, scaled_r), unit_r, fmt_f64_commas2(&fb_p, scaled_p), unit_p });
 }
 
 /// Compare raw heap allocations vs ArcPool reuse (single-threaded), stats disabled.
@@ -948,8 +1089,9 @@ pub fn run_pool_churn_mt_off(thread_count: usize) !void {
     try write_md_append(fbs.getWritten());
 
     // Console throughput summary
-    const ops_med_off = medianIqr(result.stats.ops_s_list[0..result.stats.len]);
-    var ob: [32]u8 = undefined; std.debug.print("ArcPool MT (stats=off) throughput: {s} {s}\n", .{ fmt_rate_human(&ob, ops_med_off.median), unit_suffix(ops_med_off.median) });
+    const f_ops_off = medianIqrOpsPerSecF64(&result.stats);
+    var sc_off: f64 = 0; const u_off = scale_rate_f64(&sc_off, f_ops_off.median);
+    var ob: [48]u8 = undefined; std.debug.print("ArcPool MT (stats=off) throughput: {s} {s}\n", .{ fmt_f64_commas2(&ob, sc_off), u_off });
 }
 
 // Single-threaded pool churn: generic over stats on/off
@@ -1061,9 +1203,14 @@ pub fn run_pool_stats_toggle() !void {
         "ArcPool ST (stats on) ns/op={} (~{s}) | (off) ns/op={} (~{s})\n",
         .{ on_med.median, approx_on, off_med.median, approx_off },
     );
-    var tb1: [32]u8 = undefined; var tb2: [32]u8 = undefined;
+    const f_on = medianIqrOpsPerSecF64(&on_result.stats);
+    const f_off = medianIqrOpsPerSecF64(&off_result.stats);
+    var sc_on: f64 = 0; var sc_off: f64 = 0;
+    const u_on = scale_rate_f64(&sc_on, f_on.median);
+    const u_off2 = scale_rate_f64(&sc_off, f_off.median);
+    var tb1: [48]u8 = undefined; var tb2: [48]u8 = undefined;
     std.debug.print("ArcPool ST throughput: on={s} {s} | off={s} {s}\n",
-        .{ fmt_rate_human(&tb1, on_thr.median), unit_suffix(on_thr.median), fmt_rate_human(&tb2, off_thr.median), unit_suffix(off_thr.median) });
+        .{ fmt_f64_commas2(&tb1, sc_on), u_on, fmt_f64_commas2(&tb2, sc_off), u_off2 });
 }
 
 /// Cyclic init benchmark: measure pool.createCyclic cost (stats=off).
@@ -1114,9 +1261,12 @@ pub fn run_pool_cyclic_init() !void {
     try write_md_append(fbs.getWritten());
 
     // Console throughput summary
-    const thr_cyc = medianIqr(stats.ops_s_list[0..stats.len]);
-    var cb: [32]u8 = undefined; std.debug.print("createCyclic throughput: {s} {s}\n", .{ fmt_rate_human(&cb, thr_cyc.median), unit_suffix(thr_cyc.median) });
+    const f_thr_cyc = medianIqrOpsPerSecF64(&stats);
+    var sc_c: f64 = 0; const u_c = scale_rate_f64(&sc_c, f_thr_cyc.median);
+    var cb: [48]u8 = undefined; std.debug.print("createCyclic throughput: {s} {s}\n", .{ fmt_f64_commas2(&cb, sc_c), u_c });
 }
+
+/// Compare pop-batching on vs off (by setting pop_batch=1) under MT churn with stats=off.
 
 /// In-place initializer vs copy(64B) comparison using stats=off pool.
 pub fn run_pool_inplace_vs_copy(thread_count: usize) !void {
@@ -1199,11 +1349,14 @@ pub fn run_pool_inplace_vs_copy(thread_count: usize) !void {
     try write_md_append(fbs.getWritten());
 
     // Console throughput summary (ST & MT)
-    const thr_st = medianIqr(stats.ops_s_list[0..stats.len]);
-    const thr_mt = medianIqr(mt_stats.ops_s_list[0..mt_stats.len]);
-    var ib1: [32]u8 = undefined; var ib2: [32]u8 = undefined;
+    const f_thr_st = medianIqrOpsPerSecF64(&stats);
+    const f_thr_mt = medianIqrOpsPerSecF64(&mt_stats);
+    var sc1: f64 = 0; var sc2: f64 = 0;
+    const unit_st = scale_rate_f64(&sc1, f_thr_st.median);
+    const unit_mt = scale_rate_f64(&sc2, f_thr_mt.median);
+    var fx1: [48]u8 = undefined; var fx2: [48]u8 = undefined;
     std.debug.print("In-place vs Copy throughput: ST={s} {s}, MT={s} {s}\n",
-        .{ fmt_rate_human(&ib1, thr_st.median), unit_suffix(thr_st.median), fmt_rate_human(&ib2, thr_mt.median), unit_suffix(thr_mt.median) });
+        .{ fmt_f64_commas2(&fx1, sc1), unit_st, fmt_f64_commas2(&fx2, sc2), unit_mt });
 }
 
 fn measurePoolChurnMTOffInplace(pool: *PoolTypeOff, allocator: std.mem.Allocator, thread_count: usize, iterations: u64) !u64 {
@@ -1252,11 +1405,14 @@ pub fn run_pool_tls_capacity_compare() !void {
     // TLS-heavy churn (simple create/recycle loop)
     var p8 = PoolOff8.init(allocator, .{});
     defer p8.deinit();
-    var p16 = PoolOff16.init(allocator, .{});
+    var p16 = PoolOff16.init(allocator, .{ .logical_cpus = null });
+    p16.tls_active_capacity = 16;
     defer p16.deinit();
-    var p32 = PoolOff32.init(allocator, .{});
+    var p32 = PoolOff32.init(allocator, .{ .logical_cpus = null });
+    p32.tls_active_capacity = 32;
     defer p32.deinit();
-    var p64 = PoolOff64.init(allocator, .{});
+    var p64 = PoolOff64.init(allocator, .{ .logical_cpus = null });
+    p64.tls_active_capacity = 64;
     defer p64.deinit();
 
     const r8 = try benchPoolChurnGeneric(PoolOff8, &p8, [_]u8{1} ** PoolPayloadLen, 60, 2);
@@ -1278,21 +1434,29 @@ pub fn run_pool_tls_capacity_compare() !void {
     try write_md_append(fbs.getWritten());
 
     // Console throughput summary for TLS-heavy churn
-    const thr8 = medianIqr(r8.stats.ops_s_list[0..r8.stats.len]);
-    const thr16 = medianIqr(r16.stats.ops_s_list[0..r16.stats.len]);
-    const thr32 = medianIqr(r32.stats.ops_s_list[0..r32.stats.len]);
-    const thr64 = medianIqr(r64.stats.ops_s_list[0..r64.stats.len]);
-    var tb8: [32]u8 = undefined; var tb16: [32]u8 = undefined; var tb32: [32]u8 = undefined; var tb64: [32]u8 = undefined;
+    const f_thr8 = medianIqrOpsPerSecF64(&r8.stats);
+    const f_thr16 = medianIqrOpsPerSecF64(&r16.stats);
+    const f_thr32 = medianIqrOpsPerSecF64(&r32.stats);
+    const f_thr64 = medianIqrOpsPerSecF64(&r64.stats);
+    var sc8: f64 = 0; var sc16: f64 = 0; var sc32: f64 = 0; var sc64: f64 = 0;
+    const u8s = scale_rate_f64(&sc8, f_thr8.median);
+    const u16s = scale_rate_f64(&sc16, f_thr16.median);
+    const u32s = scale_rate_f64(&sc32, f_thr32.median);
+    const u64s = scale_rate_f64(&sc64, f_thr64.median);
+    var tb8: [48]u8 = undefined; var tb16: [48]u8 = undefined; var tb32: [48]u8 = undefined; var tb64: [48]u8 = undefined;
     std.debug.print("TLS capacity (ST) throughput: 8={s} {s}, 16={s} {s}, 32={s} {s}, 64={s} {s}\n",
-        .{ fmt_rate_human(&tb8, thr8.median), unit_suffix(thr8.median), fmt_rate_human(&tb16, thr16.median), unit_suffix(thr16.median), fmt_rate_human(&tb32, thr32.median), unit_suffix(thr32.median), fmt_rate_human(&tb64, thr64.median), unit_suffix(thr64.median) });
+        .{ fmt_f64_commas2(&tb8, sc8), u8s, fmt_f64_commas2(&tb16, sc16), u16s, fmt_f64_commas2(&tb32, sc32), u32s, fmt_f64_commas2(&tb64, sc64), u64s });
 
     var p8b = PoolOff8.init(allocator, .{});
     defer p8b.deinit();
-    var p16b = PoolOff16.init(allocator, .{});
+    var p16b = PoolOff16.init(allocator, .{ .logical_cpus = null });
+    p16b.tls_active_capacity = 16;
     defer p16b.deinit();
-    var p32b = PoolOff32.init(allocator, .{});
+    var p32b = PoolOff32.init(allocator, .{ .logical_cpus = null });
+    p32b.tls_active_capacity = 32;
     defer p32b.deinit();
-    var p64b = PoolOff64.init(allocator, .{});
+    var p64b = PoolOff64.init(allocator, .{ .logical_cpus = null });
+    p64b.tls_active_capacity = 64;
     defer p64b.deinit();
 
     const burst: usize = 24; // bigger than 8 and 16
@@ -1313,22 +1477,30 @@ pub fn run_pool_tls_capacity_compare() !void {
     try write_md_append(fbs.getWritten());
 
     // Console throughput summary for bursty (24)
-    const bthr8 = medianIqr(b8.stats.ops_s_list[0..b8.stats.len]);
-    const bthr16 = medianIqr(b16.stats.ops_s_list[0..b16.stats.len]);
-    const bthr32 = medianIqr(b32.stats.ops_s_list[0..b32.stats.len]);
-    const bthr64 = medianIqr(b64.stats.ops_s_list[0..b64.stats.len]);
-    var bb8: [32]u8 = undefined; var bb16: [32]u8 = undefined; var bb32: [32]u8 = undefined; var bb64: [32]u8 = undefined;
+    const f_bthr8 = medianIqrOpsPerSecF64(&b8.stats);
+    const f_bthr16 = medianIqrOpsPerSecF64(&b16.stats);
+    const f_bthr32 = medianIqrOpsPerSecF64(&b32.stats);
+    const f_bthr64 = medianIqrOpsPerSecF64(&b64.stats);
+    var bsc8: f64 = 0; var bsc16: f64 = 0; var bsc32: f64 = 0; var bsc64: f64 = 0;
+    const bu8 = scale_rate_f64(&bsc8, f_bthr8.median);
+    const bu16 = scale_rate_f64(&bsc16, f_bthr16.median);
+    const bu32 = scale_rate_f64(&bsc32, f_bthr32.median);
+    const bu64 = scale_rate_f64(&bsc64, f_bthr64.median);
+    var bb8: [48]u8 = undefined; var bb16: [48]u8 = undefined; var bb32: [48]u8 = undefined; var bb64: [48]u8 = undefined;
     std.debug.print("TLS capacity (burst=24) throughput: 8={s} {s}, 16={s} {s}, 32={s} {s}, 64={s} {s}\n",
-        .{ fmt_rate_human(&bb8, bthr8.median), unit_suffix(bthr8.median), fmt_rate_human(&bb16, bthr16.median), unit_suffix(bthr16.median), fmt_rate_human(&bb32, bthr32.median), unit_suffix(bthr32.median), fmt_rate_human(&bb64, bthr64.median), unit_suffix(bthr64.median) });
+        .{ fmt_f64_commas2(&bb8, bsc8), bu8, fmt_f64_commas2(&bb16, bsc16), bu16, fmt_f64_commas2(&bb32, bsc32), bu32, fmt_f64_commas2(&bb64, bsc64), bu64 });
 
     // Second burst scenario: burst=72, no TLS drain between repeats.
     var p8c = PoolOff8.init(allocator, .{});
     defer p8c.deinit();
-    var p16c = PoolOff16.init(allocator, .{});
+    var p16c = PoolOff16.init(allocator, .{ .logical_cpus = null });
+    p16c.tls_active_capacity = 16;
     defer p16c.deinit();
-    var p32c = PoolOff32.init(allocator, .{});
+    var p32c = PoolOff32.init(allocator, .{ .logical_cpus = null });
+    p32c.tls_active_capacity = 32;
     defer p32c.deinit();
-    var p64c = PoolOff64.init(allocator, .{});
+    var p64c = PoolOff64.init(allocator, .{ .logical_cpus = null });
+    p64c.tls_active_capacity = 64;
     defer p64c.deinit();
 
     const burst2: usize = 72;
@@ -1349,13 +1521,18 @@ pub fn run_pool_tls_capacity_compare() !void {
     try write_md_append(fbs.getWritten());
 
     // Console throughput summary for bursty (72 no drain)
-    const nd8 = medianIqr(b8_nd.stats.ops_s_list[0..b8_nd.stats.len]);
-    const nd16 = medianIqr(b16_nd.stats.ops_s_list[0..b16_nd.stats.len]);
-    const nd32 = medianIqr(b32_nd.stats.ops_s_list[0..b32_nd.stats.len]);
-    const nd64 = medianIqr(b64_nd.stats.ops_s_list[0..b64_nd.stats.len]);
-    var nb8: [32]u8 = undefined; var nb16: [32]u8 = undefined; var nb32: [32]u8 = undefined; var nb64: [32]u8 = undefined;
+    const f_nd8 = medianIqrOpsPerSecF64(&b8_nd.stats);
+    const f_nd16 = medianIqrOpsPerSecF64(&b16_nd.stats);
+    const f_nd32 = medianIqrOpsPerSecF64(&b32_nd.stats);
+    const f_nd64 = medianIqrOpsPerSecF64(&b64_nd.stats);
+    var nsc8: f64 = 0; var nsc16: f64 = 0; var nsc32: f64 = 0; var nsc64: f64 = 0;
+    const nu8 = scale_rate_f64(&nsc8, f_nd8.median);
+    const nu16 = scale_rate_f64(&nsc16, f_nd16.median);
+    const nu32 = scale_rate_f64(&nsc32, f_nd32.median);
+    const nu64 = scale_rate_f64(&nsc64, f_nd64.median);
+    var nb8: [48]u8 = undefined; var nb16: [48]u8 = undefined; var nb32: [48]u8 = undefined; var nb64: [48]u8 = undefined;
     std.debug.print("TLS capacity (burst=72,no-drain) throughput: 8={s} {s}, 16={s} {s}, 32={s} {s}, 64={s} {s}\n",
-        .{ fmt_rate_human(&nb8, nd8.median), unit_suffix(nd8.median), fmt_rate_human(&nb16, nd16.median), unit_suffix(nd16.median), fmt_rate_human(&nb32, nd32.median), unit_suffix(nd32.median), fmt_rate_human(&nb64, nd64.median), unit_suffix(nd64.median) });
+        .{ fmt_f64_commas2(&nb8, nsc8), nu8, fmt_f64_commas2(&nb16, nsc16), nu16, fmt_f64_commas2(&nb32, nsc32), nu32, fmt_f64_commas2(&nb64, nsc64), nu64 });
 }
 
 pub fn run_pool_stats_toggle_mt(thread_count: usize) !void {
@@ -1388,7 +1565,7 @@ pub fn run_pool_stats_toggle_mt(thread_count: usize) !void {
 }
 
 // Split scenarios (diagnostic): TLS-only, Global-only, Allocator-only
-fn benchPoolTlsOnly(pool: *PoolTypeOn, target_ms: u64, repeats: usize) !BenchRes {
+fn benchPoolTlsOnly(pool: *PoolTypeOff, target_ms: u64, repeats: usize) !BenchRes {
     const payload = [_]u8{0} ** PoolPayloadLen;
     // Prefill TLS: a few create/recycle cycles.
     var k: usize = 0;
@@ -1396,10 +1573,10 @@ fn benchPoolTlsOnly(pool: *PoolTypeOn, target_ms: u64, repeats: usize) !BenchRes
         const arc_w = try pool.create(payload);
         pool.recycle(arc_w);
     }
-    return benchPoolChurnGeneric(PoolTypeOn, pool, payload, target_ms, repeats);
+    return benchPoolChurnGeneric(PoolTypeOff, pool, payload, target_ms, repeats);
 }
 
-fn benchPoolGlobalOnly(pool: *PoolTypeOn, target_ms: u64, repeats: usize) !BenchRes {
+fn benchPoolGlobalOnly(pool: *PoolTypeOff, target_ms: u64, repeats: usize) !BenchRes {
     const allocator = getAllocator();
     const payload = [_]u8{1} ** PoolPayloadLen;
     // Ensure TLS is emptied into global, then prefill global via recycleSlow.
@@ -1440,7 +1617,7 @@ fn benchPoolGlobalOnly(pool: *PoolTypeOn, target_ms: u64, repeats: usize) !Bench
 
 fn benchPoolAllocOnly(target_ms: u64, repeats: usize) !BenchRes {
     const allocator = getAllocator();
-    var pool = PoolTypeOn.init(allocator, .{});
+    var pool = PoolTypeOff.init(allocator, .{});
     defer pool.deinit();
     const payload = [_]u8{2} ** PoolPayloadLen;
 
@@ -1482,11 +1659,11 @@ fn benchPoolAllocOnly(target_ms: u64, repeats: usize) !BenchRes {
 }
 
 pub fn run_pool_split_scenarios() !void {
-    var pool_tls = PoolTypeOn.init(getAllocator(), .{});
+    var pool_tls = PoolTypeOff.init(getAllocator(), .{});
     defer pool_tls.deinit();
     const tls = try benchPoolTlsOnly(&pool_tls, 60, 2);
 
-    var pool_global = PoolTypeOn.init(getAllocator(), .{});
+    var pool_global = PoolTypeOff.init(getAllocator(), .{});
     defer pool_global.deinit();
     const global = try benchPoolGlobalOnly(&pool_global, 60, 2);
 
@@ -1505,41 +1682,64 @@ pub fn run_pool_split_scenarios() !void {
     try write_md_append(fbs.getWritten());
 
     // Console throughput summary
-    const thr_tls = medianIqr(tls.stats.ops_s_list[0..tls.stats.len]);
-    const thr_glob = medianIqr(global.stats.ops_s_list[0..global.stats.len]);
-    const thr_alloc = medianIqr(alloc.stats.ops_s_list[0..alloc.stats.len]);
-    var sb1: [32]u8 = undefined; var sb2: [32]u8 = undefined; var sb3: [32]u8 = undefined;
+    const f_thr_tls = medianIqrOpsPerSecF64(&tls.stats);
+    const f_thr_glob = medianIqrOpsPerSecF64(&global.stats);
+    const f_thr_alloc = medianIqrOpsPerSecF64(&alloc.stats);
+    var s1: f64 = 0; var s2: f64 = 0; var s3: f64 = 0;
+    const unit_tls = scale_rate_f64(&s1, f_thr_tls.median);
+    const unit_glob = scale_rate_f64(&s2, f_thr_glob.median);
+    const unit_alloc = scale_rate_f64(&s3, f_thr_alloc.median);
+    var sb1: [48]u8 = undefined; var sb2: [48]u8 = undefined; var sb3: [48]u8 = undefined;
     std.debug.print("Split scenarios throughput: TLS={s} {s}, Global={s} {s}, Allocator={s} {s}\n",
-        .{ fmt_rate_human(&sb1, thr_tls.median), unit_suffix(thr_tls.median), fmt_rate_human(&sb2, thr_glob.median), unit_suffix(thr_glob.median), fmt_rate_human(&sb3, thr_alloc.median), unit_suffix(thr_alloc.median) });
-}
-
-fn shouldRunMT() bool {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    var env = std.process.getEnvMap(arena.allocator()) catch return false;
-    if (env.get("ARC_BENCH_RUN_MT")) |v| {
-        return std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true");
-    }
-    return false;
+        .{ fmt_f64_commas2(&sb1, s1), unit_tls, fmt_f64_commas2(&sb2, s2), unit_glob, fmt_f64_commas2(&sb3, s3), unit_alloc });
 }
 
 pub fn main() !void {
-    const mt_threads = detectThreadCount();
-    try run_single(mt_threads);
-    if (shouldRunMT()) {
-        try run_multi(mt_threads);
-        try run_pool_churn_mt(mt_threads);
-        try run_pool_stats_toggle_mt(mt_threads);
-        try run_pool_churn_mt_off(mt_threads);
+    // Produce only the requested Arc tables
+    try run_single(4);
+
+    // Optional: one-off uncontended SVO microbench (no time checking).
+    // Enable by setting env ARC_BENCH_UNCONTENDED=1
+    // Prints results to console only; does not modify the MD report.
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    if (std.process.getEnvMap(arena.allocator())) |env| {
+        if (env.get("ARC_BENCH_UNCONTENDED")) |_| {
+            try run_uncontended_arc_svo_max();
+        }
+    } else |_| {}
+}
+
+// One-off uncontended microbenchmark for Arc SVO (u32), single thread,
+// with a fixed maximum iteration count and no time checks inside the loop.
+fn run_uncontended_arc_svo_max() !void {
+    const allocator = getAllocator();
+    const ArcType = beam.Utils.Arc(u32);
+    const max_iter: u64 = 500_000_000;
+
+    var base = try ArcType.init(allocator, 123);
+    defer base.release();
+
+    var t = try Timer.start();
+    var i: u64 = 0;
+    while (i < max_iter) : (i += 1) {
+        const c = base.clone();
+        // Prevent the optimizer from eliding the loop body when SVO makes
+        // clone/release a no-op with no externally visible effects.
+        std.mem.doNotOptimizeAway(c);
+        c.release();
     }
-    try run_svo_vs_heap();
-    try run_downgrade_upgrade();
-    try run_pool_churn();
-    try run_pool_stats_toggle();
-    try run_pool_cyclic_init();
-    try run_pool_inplace_vs_copy(mt_threads);
-    try run_pool_tls_capacity_compare();
-    try run_pool_churn_off();
-    // Include diagnostic split scenarios (TLS-only, Global-only, Allocator-only)
-    try run_pool_split_scenarios();
+    const ns = t.read();
+
+    // Compute and print simple stats
+    // f64-based metrics to avoid integer underflow/overflow artifacts.
+    const ns_f = @as(f64, @floatFromInt(ns));
+    const it_f = @as(f64, @floatFromInt(max_iter));
+    const ns_per_f = if (max_iter == 0) 0.0 else ns_f / it_f;
+    const ops_s_f = if (ns == 0) 0.0 else (it_f * 1_000_000_000.0) / ns_f;
+    var ib: [32]u8 = undefined; const s_iters = fmt_u64_commas(&ib, max_iter);
+    var fb1: [48]u8 = undefined; const s_ns = fmt_f64_commas2(&fb1, ns_per_f);
+    var scaled: f64 = 0; const unit = scale_rate_f64(&scaled, ops_s_f);
+    var fb2: [48]u8 = undefined; const s_rate = fmt_f64_commas2(&fb2, scaled);
+    std.debug.print("[Uncontended SVO 1T] iters={s}  ns/op={s}  Throughput={s} {s}\n", .{ s_iters, s_ns, s_rate, unit });
 }

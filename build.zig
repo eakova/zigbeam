@@ -30,7 +30,8 @@ fn add_utils(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const step_samples_tlc = b.step("samples-tlc", "Run thread-local cache samples");
     const step_samples_arc = b.step("samples-arc", "Run Arc samples");
     const step_bench_tlc = b.step("bench-tlc", "Run Thread-Local Cache benchmarks");
-    const step_bench_arc = b.step("bench-arc", "Run Arc/ArcPool benchmarks");
+    const step_bench_arc = b.step("bench-arc", "Run Arc benchmarks");
+    const step_bench_arc_pool = b.step("bench-arc-pool", "Run ArcPool benchmarks");
 
     // Internal modules (not exported directly): use createModule
     const tagged_ptr_mod = b.createModule(.{ .root_source_file = b.path("src/utils/tagged-pointer/tagged_pointer.zig"), .target = target, .optimize = optimize });
@@ -74,6 +75,7 @@ fn add_utils(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         // For consistency, both benches import the wrapper module "zig_beam".
         .{ .name = "tlc-bench", .exe_name = "tlc_bench", .path = "src/utils/thread-local-cache/_thread_local_cache_benchmarks.zig", .imports = &.{.{ .name = "zig_beam", .module = wrapper }} },
         .{ .name = "arc-bench", .exe_name = "arc_bench", .path = "src/utils/arc/_arc_benchmarks.zig", .imports = &.{.{ .name = "zig_beam", .module = wrapper }} },
+        .{ .name = "arcpool-bench", .exe_name = "arcpool_bench", .path = "src/utils/arc/arc-pool/_arc_pool_benchmarks.zig", .imports = &.{.{ .name = "zig_beam", .module = wrapper }} },
     };
 
     // Provide internal module names to tests (only for repo-internal builds)
@@ -109,8 +111,10 @@ fn add_utils(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
 
     const tlc_bench = addBenchRun(b, target, optimize, bench_specs[0]);
     const arc_bench = addBenchRun(b, target, optimize, bench_specs[1]);
+    const arcpool_bench = addBenchRun(b, target, optimize, bench_specs[2]);
     step_bench_tlc.dependOn(&tlc_bench.step);
     step_bench_arc.dependOn(&arc_bench.step);
+    step_bench_arc_pool.dependOn(&arcpool_bench.step);
 }
 
 pub fn build(b: *std.Build) void {
