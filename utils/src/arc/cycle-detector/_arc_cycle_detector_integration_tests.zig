@@ -11,7 +11,7 @@ const Node = struct {
 
 const NodeArc = ArcModule.Arc(Node);
 const Detector = DetectorModule.ArcCycleDetector(Node);
-const Pool = ArcPoolModule.ArcPool(Node);
+const Pool = ArcPoolModule.ArcPool(Node, false);
 
 fn traceNode(_: ?*anyopaque, allocator: std.mem.Allocator, data: *const Node, children: *Detector.ChildList) void {
     if (data.next) |child| {
@@ -260,4 +260,55 @@ test "ArcCycleDetector scales with pooled tracking across threads" {
     weak_b.release();
 
     try testing.expectEqual(@as(usize, 2), leaks.list.items.len);
+}
+
+// newCyclic: self-weak tek başına güçlü döngü oluşturmaz; dedektör sızıntı bulmamalı.
+const NodeC_New = struct { weak_self: ArcModule.ArcWeak(@This()), pad: [64]u8 = [_]u8{0} ** 64 };
+const ArcNodeC_New = ArcModule.Arc(NodeC_New);
+const DetectorC_New = DetectorModule.ArcCycleDetector(NodeC_New);
+fn traceC_New(_: ?*anyopaque, allocator: std.mem.Allocator, data: *const NodeC_New, children: *DetectorC_New.ChildList) void {
+    _ = allocator;
+    _ = children;
+    _ = data;
+}
+test "ArcCycleDetector ignores self-weak from Arc.newCyclic" {
+    var detector = DetectorC_New.init(testing.allocator, traceC_New, null);
+    defer detector.deinit();
+
+    var arc = try ArcNodeC_New.newCyclic(testing.allocator, struct {
+        fn ctor(w: ArcModule.ArcWeak(NodeC_New)) anyerror!NodeC_New { return NodeC_New{ .weak_self = w, }; }
+    }.ctor);
+    try detector.track(arc.clone());
+    arc.release();
+
+    var leaks = try detector.detectCycles();
+    defer leaks.deinit();
+    try testing.expectEqual(@as(usize, 0), leaks.list.items.len);
+}
+
+// createCyclic: pool üstünden self-weak oluşturulur; güçlü döngü yoksa dedektör sızıntı görmez.
+const NodeC_Pool = struct { weak_self: ArcModule.ArcWeak(@This()), pad: [64]u8 = [_]u8{0} ** 64 };
+const PoolC_Pool = ArcPoolModule.ArcPool(NodeC_Pool, false);
+const DetectorC_Pool = DetectorModule.ArcCycleDetector(NodeC_Pool);
+fn traceC_Pool(_: ?*anyopaque, allocator: std.mem.Allocator, data: *const NodeC_Pool, children: *DetectorC_Pool.ChildList) void {
+    _ = allocator;
+    _ = children;
+    _ = data;
+}
+test "ArcCycleDetector ignores self-weak from ArcPool.createCyclic" {
+    var detector = DetectorC_Pool.init(testing.allocator, traceC_Pool, null);
+    defer detector.deinit();
+
+    var pool = PoolC_Pool.init(testing.allocator);
+    defer pool.deinit();
+
+    const ctor = struct { fn f(w: ArcModule.ArcWeak(NodeC_Pool)) anyerror!NodeC_Pool { return NodeC_Pool{ .weak_self = w, }; } }.f;
+    var arc = try pool.createCyclic(ctor);
+    try detector.track(arc.clone());
+    pool.recycle(arc);
+    pool.drainThreadCache();
+
+    var leaks = try detector.detectCycles();
+    defer leaks.deinit();
+    try testing.expectEqual(@as(usize, 0), leaks.list.items.len);
 }

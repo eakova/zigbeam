@@ -13,9 +13,10 @@ const DetectorModule = @import("cycle-detector/arc_cycle_detector.zig");
 const ArcU32 = ArcModule.Arc(u32);
 const ArcString = ArcModule.Arc([]const u8);
 const ArcBytes = ArcModule.Arc([4]u8);
-const Pool = ArcPoolModule.ArcPool(Node);
+const Pool = ArcPoolModule.ArcPool(Node, false);
 const Detector = DetectorModule.ArcCycleDetector(Node);
-const CounterPool = ArcPoolModule.ArcPool(struct { value: usize });
+const CounterPool = ArcPoolModule.ArcPool(struct { value: usize }, false);
+const ArcWeak = ArcModule.ArcWeak;
 
 const Node = struct {
     label: u8,
@@ -183,6 +184,42 @@ pub fn sampleAdvancedPoolWithThreadCache(allocator: std.mem.Allocator) !usize {
     return total.load(.seq_cst);
 }
 
+// --------------------------------------------------------------------------
+// NEW: In-place init and cyclic samples
+// --------------------------------------------------------------------------
+/// Create pooled payloads using in-place initializer (no memcpy).
+pub fn sampleInPlaceInitArcPool(allocator: std.mem.Allocator) !u8 {
+    const P = struct { bytes: [4]u8 };
+    var pool = ArcPoolModule.ArcPool(P, false).init(allocator);
+    defer pool.deinit();
+    const init_fn = struct { fn f(p: *P) void { @memset(&p.bytes, 42); } }.f;
+    var arc = try pool.createWithInitializer(init_fn);
+    defer pool.recycle(arc);
+    return arc.get().*.bytes[0];
+}
+
+test "sample (new): in-place init via ArcPool" {
+    try testing.expectEqual(@as(u8, 42), try sampleInPlaceInitArcPool(testing.allocator));
+}
+
+/// Construct a self-referential node using `Arc.newCyclic`.
+pub fn sampleNewCyclicArc(allocator: std.mem.Allocator) !bool {
+    const NodeC = struct { weak_self: ArcWeak(@This()) = ArcWeak(@This()).empty() };
+    const ArcNodeC = ArcModule.Arc(NodeC);
+    var arc = try ArcNodeC.newCyclic(allocator, struct {
+        fn ctor(w: ArcWeak(NodeC)) anyerror!NodeC { return NodeC{ .weak_self = w }; }
+    }.ctor);
+    const up = arc.get().*.weak_self.upgrade();
+    const ok = up != null;
+    if (up) |t| t.release();
+    arc.release();
+    return ok;
+}
+
+test "sample (new): newCyclic builds self-weak" {
+    try testing.expect(try sampleNewCyclicArc(testing.allocator));
+}
+
 const ThreadCacheCtx = struct {
     pool: *CounterPool,
     sum: *std.atomic.Value(usize),
@@ -218,9 +255,11 @@ pub fn main() !void {
     const cow = try sampleModerateMakeMut(allocator);
     const leak_count = try sampleAdvancedPoolAndDetector(allocator);
     const pool_sum = try sampleAdvancedPoolWithThreadCache(allocator);
+    const inplace = try sampleInPlaceInitArcPool(allocator);
+    const cyclic_ok = try sampleNewCyclicArc(allocator);
 
     std.debug.print(
-        "ARC samples -> simple_sum={}, weak_cache={}, cow={}, leaks={}, pool_sum={}\n",
-        .{ simple, weak_cache, cow, leak_count, pool_sum },
+        "ARC samples -> simple_sum={}, weak_cache={}, cow={}, leaks={}, pool_sum={}, inplace_first={}, cyclic={}\n",
+        .{ simple, weak_cache, cow, leak_count, pool_sum, inplace, cyclic_ok },
     );
 }

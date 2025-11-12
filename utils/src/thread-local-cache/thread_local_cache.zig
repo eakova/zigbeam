@@ -70,6 +70,18 @@ pub fn ThreadLocalCache(
     comptime T: type,
     comptime recycle_callback: ?*const fn (context: ?*anyopaque, item: T) void,
 ) type {
+    return ThreadLocalCacheWithCapacity(T, recycle_callback, 8);
+}
+
+/// Same as `ThreadLocalCache`, but allows choosing the capacity at comptime.
+///
+/// Keeping this as a separate factory preserves the original API and avoids
+/// changing call sites that rely on the default capacity.
+pub fn ThreadLocalCacheWithCapacity(
+    comptime T: type,
+    comptime recycle_callback: ?*const fn (context: ?*anyopaque, item: T) void,
+    comptime Capacity: usize,
+) type {
     // Compile-time validation to ensure T is a pointer type. This prevents
     // misuse, for example, by trying to cache large structs by value.
     comptime {
@@ -84,7 +96,7 @@ pub fn ThreadLocalCache(
         /// The optimal size for an L1 cache. Small enough to be fast and avoid
         /// cache pollution, large enough to be effective. 8 pointers on a 64-bit
         /// system is 64 bytes, fitting perfectly into a single CPU cache line.
-        pub const capacity = 8;
+        pub const capacity: usize = Capacity;
 
         /// The underlying storage for the cache. Using an array of optionals
         /// makes debugging easier and is optimized away in release builds.

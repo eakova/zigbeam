@@ -1,0 +1,64 @@
+name: Draft Release on Tag
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  draft_release:
+    name: Create draft GitHub release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare release body
+        id: body
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          DATE="$(date -u +%Y-%m-%d)"
+          OUT="$RUNNER_TEMP/release_body.md"
+          cat > "$OUT" << EOF
+          # Zig‑Beam ${TAG}
+
+          Date: ${DATE}
+
+          This is a draft release generated from tag ${TAG}.
+
+          ## Reports
+          - Arc benchmarks: utils/docs/arc_benchmark_results.md
+          - Thread‑Local Cache benchmarks: utils/docs/thread_local_cache_benchmark_results.md
+          - Dependency graph: utils/docs/dependency_graph.md
+
+          ## Quick Start (pin by tag)
+          ```bash
+          zig fetch --save https://github.com/eakova/zig-beam/archive/refs/tags/${TAG}.tar.gz
+          ```
+
+          In build.zig:
+          ```zig
+          const beam = b.dependency("zig-beam", .{});
+          const utils = beam.module("utils");
+          exe.root_module.addImport("utils", utils);
+          ```
+
+          In code:
+          ```zig
+          const utils = @import("utils");
+          ```
+          EOF
+          echo "path=$OUT" >> $GITHUB_OUTPUT
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body_path: ${{ steps.body.outputs.path }}
+          files: |
+            utils/docs/*.md

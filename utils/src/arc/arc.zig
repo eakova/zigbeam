@@ -137,22 +137,92 @@ pub fn Arc(comptime T: type) type {
             }
         }
 
+        pub fn initWithInitializer(allocator: Allocator, initializer: *const fn (*T) void) !Self {
+            if (comptime use_svo) {
+                var self: Self = undefined;
+                self.storage = .{ .inline_data = undefined };
+                const p: *T = @ptrCast(@alignCast(&self.storage.inline_data));
+                initializer(p);
+                return self;
+            } else {
+                const block = try allocator.create(InnerBlock);
+                block.inner.counters.strong_count.store(1, .monotonic);
+                block.inner.counters.weak_count.store(0, .monotonic);
+                block.inner.allocator = allocator;
+                block.inner.next_in_freelist = null;
+                initializer(&block.inner.data);
+                const tagged = InnerTaggedPtr.new(&block.inner, TAG_POINTER) catch unreachable;
+                return .{ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
+            }
+        }
+
+        pub fn initWithInitializerFallible(allocator: Allocator, initializer: *const fn (*T) anyerror!void) !Self {
+            if (comptime use_svo) {
+                var self: Self = undefined;
+                self.storage = .{ .inline_data = undefined };
+                const p: *T = @ptrCast(@alignCast(&self.storage.inline_data));
+                try initializer(p);
+                return self;
+            } else {
+                const block = try allocator.create(InnerBlock);
+                block.inner.counters.strong_count.store(1, .monotonic);
+                block.inner.counters.weak_count.store(0, .monotonic);
+                block.inner.allocator = allocator;
+                block.inner.next_in_freelist = null;
+                if (initializer(&block.inner.data)) |_| {
+                    const tagged = InnerTaggedPtr.new(&block.inner, TAG_POINTER) catch unreachable;
+                    return .{ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
+                } else |e| {
+                    // free and propagate error
+                    allocator.destroy(block);
+                    return e;
+                }
+            }
+        }
+
+        /// Create an `Arc<T>` where `T` can capture a `Weak` to itself during initialization.
+        /// This is analogous to Rust's `Arc::new_cyclic` and is only supported for heap arcs
+        /// (SVO devre dışı). The initializer constructs a value given a temporary `ArcWeak(T)`.
+        pub fn newCyclic(allocator: Allocator, ctor: *const fn (ArcWeak(T)) anyerror!T) !Self {
+            if (comptime use_svo) {
+                @compileError("Arc.newCyclic requires heap allocation; SVO is not supported");
+            }
+            const block = try allocator.create(InnerBlock);
+            block.inner.counters.strong_count.store(1, .monotonic);
+            block.inner.counters.weak_count.store(1, .monotonic); // hold a temporary weak during init
+            block.inner.allocator = allocator;
+            block.inner.next_in_freelist = null;
+
+            var weak = ArcWeak(T){ .inner = &block.inner };
+            const value = ctor(weak) catch |e| {
+                // roll back allocation
+                allocator.destroy(block);
+                return e;
+            };
+            block.inner.data = value;
+            // Drop the temporary weak we held during construction
+            weak.release();
+
+            const tagged = InnerTaggedPtr.new(&block.inner, TAG_POINTER) catch unreachable;
+            return .{ .storage = .{ .ptr_with_tag = tagged.toUnsigned() } };
+        }
+
+        /// Non-fallible convenience for `newCyclic`.
+        pub fn newCyclicNoError(allocator: Allocator, ctor: *const fn (ArcWeak(T)) T) !Self {
+            return newCyclic(allocator, struct {
+                fn wrap(w: ArcWeak(T)) anyerror!T { return ctor(w); }
+            }.wrap);
+        }
+
         pub inline fn clone(self: *const Self) Self {
             if (self.isInline()) return self.*;
             const inner = self.asPtr();
-            var old_count = inner.counters.strong_count.load(.monotonic);
-            while (true) {
-                if (old_count == 0) @panic("Arc: Attempted to clone a deallocated reference");
-                if (comptime builtin.mode != .ReleaseFast) {
-                    if (old_count > std.math.maxInt(usize) / 2) @panic("Arc: Reference count overflow");
-                }
-                if (inner.counters.strong_count.cmpxchgWeak(old_count, old_count + 1, .monotonic, .monotonic)) |new_old| {
-                    old_count = new_old;
-                    std.atomic.spinLoopHint();
-                    continue;
-                }
-                return .{ .storage = self.storage };
+            const prev = inner.counters.strong_count.fetchAdd(1, .monotonic);
+            if (prev == 0) @panic("Arc: Attempted to clone a deallocated reference");
+            if (comptime builtin.mode != .ReleaseFast) {
+                if (prev > std.math.maxInt(usize) / 2) @panic("Arc: Reference count overflow");
             }
+            return .{ .storage = self.storage };
         }
 
         pub inline fn release(self: Self) void {

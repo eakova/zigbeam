@@ -133,3 +133,45 @@ test "Arc heap makeMut keeps pointer when unique" {
     mut_ptr.*[0] = 99;
     try testing.expectEqual(@as(u8, 99), arc.get().*[0]);
 }
+
+// In-place initializer should write payload without memcpy for inline and heap arcs.
+test "Arc initWithInitializer works (inline and heap)" {
+    // Inline (u32)
+    var a_inline = try ArcModule.Arc(u32).initWithInitializer(testing.allocator, struct {
+        fn init(p: *u32) void { p.* = 1234; }
+    }.init);
+    try testing.expect(a_inline.isInline());
+    try testing.expectEqual(@as(u32, 1234), a_inline.get().*);
+    a_inline.release();
+
+    // Heap ([32]u8)
+    var a_heap = try ArcModule.Arc([32]u8).initWithInitializer(testing.allocator, struct {
+        fn init(p: *[32]u8) void { @memset(p, 9); }
+    }.init);
+    try testing.expect(!a_heap.isInline());
+    try testing.expectEqual(@as(u8, 9), a_heap.get().*[0]);
+    a_heap.release();
+}
+
+// newCyclic should allow constructing a value that captures a Weak to itself.
+test "Arc newCyclic builds self-referential weak and upgrades before/after drop semantics" {
+    const Node = struct { weak_self: ArcModule.ArcWeak(@This()) = ArcModule.ArcWeak(@This()).empty() };
+    const ArcNode = ArcModule.Arc(Node);
+
+    var arc = try ArcNode.newCyclic(testing.allocator, struct {
+        fn ctor(w: ArcModule.ArcWeak(Node)) anyerror!Node {
+            // Keep a counted weak by cloning the temporary weak
+            const kept = w.clone();
+            return Node{ .weak_self = kept };
+        }
+    }.ctor);
+    // Upgrade succeeds while strong exists
+    const up = arc.get().*.weak_self.upgrade();
+    try testing.expect(up != null);
+    if (up) |tmp| tmp.release();
+    const weak_copy = arc.get().*.weak_self.clone();
+    arc.release();
+    // After last strong drop, upgrade must fail
+    try testing.expect(weak_copy.upgrade() == null);
+    weak_copy.release();
+}
