@@ -1,0 +1,865 @@
+//! Benchmarks for ThreadLocalCache.
+//! Comments walk through the flow step by step:
+//! 1) warm up, 2) scale iterations, 3) record stats, 4) print + write docs.
+
+const std = @import("std");
+const beam = @import("zig_beam");
+const cache_mod = beam.Libs;
+const cache_raw = beam.Libs;
+
+// Simple item to cache. We only traffic in pointers to this.
+const Item = struct { id: usize };
+
+// Callback used in some benchmarks to simulate returning items to a global pool.
+const AtomicUsize = std.atomic.Value(usize);
+fn recycle_atomic(ctx: ?*anyopaque, _: *Item) void {
+    if (ctx) |p| {
+        const counter: *AtomicUsize = @ptrCast(@alignCast(p));
+        _ = counter.fetchAdd(1, .seq_cst);
+    }
+}
+
+// Cache type aliases
+const CacheNoCb = cache_mod.ThreadLocalCache(*Item, null);
+const CacheWithCb = cache_mod.ThreadLocalCache(*Item, recycle_atomic);
+// Auto/fixed capacity variants for comparative tables
+const CacheAuto = cache_raw.ThreadLocalCacheWithOptions(*Item, null, .{});
+const CacheFix8  = cache_mod.ThreadLocalCacheWithCapacity(*Item, null, 8);
+const CacheFix16 = cache_mod.ThreadLocalCacheWithCapacity(*Item, null, 16);
+const CacheFix32 = cache_mod.ThreadLocalCacheWithCapacity(*Item, null, 32);
+const CacheFix64 = cache_mod.ThreadLocalCacheWithCapacity(*Item, null, 64);
+// Sanitize toggle (same capacity) for push/pop cost
+const CacheSanOn  = cache_raw.ThreadLocalCacheWithOptions(*Item, null, .{ .capacity = 16, .active_capacity = 16, .sanitize_slots = true });
+const CacheSanOff = cache_raw.ThreadLocalCacheWithOptions(*Item, null, .{ .capacity = 16, .active_capacity = 16, .sanitize_slots = false });
+// Active capacity sweep with fixed capacity=64
+const CacheCap64_A32 = cache_raw.ThreadLocalCacheWithOptions(*Item, null, .{ .capacity = 64, .active_capacity = 32 });
+const CacheCap64_A48 = cache_raw.ThreadLocalCacheWithOptions(*Item, null, .{ .capacity = 64, .active_capacity = 48 });
+const CacheCap64_A64 = cache_raw.ThreadLocalCacheWithOptions(*Item, null, .{ .capacity = 64, .active_capacity = 64 });
+
+const MD_PATH = "src/libs/thread-local-cache/TLC_BENCHMARK_RESULTS.md";
+
+fn md_truncate_write(content: []const u8) !void {
+    var file = std.fs.cwd().createFile(MD_PATH, .{ .truncate = true }) catch |err| switch (err) {
+        error.NoSpaceLeft => {
+            // Try to at least leave a small marker file; ignore errors.
+            var f = std.fs.cwd().createFile(MD_PATH, .{ .truncate = true }) catch return;
+            defer f.close();
+            _ = f.writeAll("# ThreadLocalCache Benchmark Results\n\n(note: truncated, no space left)\n") catch {};
+            return;
+        },
+        else => return err,
+    };
+    defer file.close();
+    file.writeAll(content) catch |err| switch (err) {
+        error.NoSpaceLeft => {
+            _ = file.setEndPos(0) catch {};
+            _ = file.writeAll("# ThreadLocalCache Benchmark Results\n\n(note: truncated, no space left)\n") catch {};
+            return;
+        },
+        else => return err,
+    };
+}
+
+fn md_append(content: []const u8) !void {
+    var file = std.fs.cwd().openFile(MD_PATH, .{ .mode = .read_write }) catch
+        std.fs.cwd().createFile(MD_PATH, .{}) catch |err| switch (err) {
+            error.NoSpaceLeft => return, // give up quietly; console still has details
+            else => return err,
+        };
+    defer file.close();
+    if (file.seekFromEnd(0)) |_| {
+        file.writeAll(content) catch |err| switch (err) {
+            error.NoSpaceLeft => return, // ignore; do not fail the whole bench
+            else => return err,
+        };
+    } else |_| {
+        // If seek fails (unlikely), try best-effort write at current pos.
+        file.writeAll(content) catch |err| switch (err) {
+            error.NoSpaceLeft => return,
+            else => return err,
+        };
+    }
+}
+
+// Format helpers for Markdown: u64 with thousands separators.
+fn fmt_u64_commas(buf: *[32]u8, value: u64) []const u8 {
+    var i: usize = buf.len;
+    var v = value;
+    if (v == 0) {
+        i -= 1; buf[i] = '0';
+        return buf[i..];
+    }
+    var group: u32 = 0;
+    while (v > 0) {
+        const digit: u8 = @intCast(v % 10);
+        v /= 10;
+        i -= 1; buf[i] = '0' + digit;
+        group += 1;
+        if (v != 0 and group % 3 == 0) {
+            i -= 1; buf[i] = ',';
+        }
+    }
+    return buf[i..];
+}
+
+fn fmt_rate_human(buf: *[32]u8, rate: u64) []const u8 {
+    // Simple unit scaling without floats: K/s, M/s, G/s
+    if (rate >= 1_000_000_000) {
+        const v = rate / 1_000_000_000;
+        const s = fmt_u64_commas(buf, v);
+        // reuse the same buffer; append suffix in-place is tricky, so return only number
+        // caller prints suffix; this keeps code simple and compatible with Zig 0.15
+        return s;
+    } else if (rate >= 1_000_000) {
+        const v = rate / 1_000_000;
+        return fmt_u64_commas(buf, v);
+    } else if (rate >= 1_000) {
+        const v = rate / 1_000;
+        return fmt_u64_commas(buf, v);
+    } else {
+        return fmt_u64_commas(buf, rate);
+    }
+}
+
+// f64 formatting helpers to avoid integer underflow/overflow artifacts
+fn fmt_f64_commas2(buf: *[48]u8, val: f64) []const u8 {
+    const ival_f = @floor(val);
+    const ival = @as(u64, @intFromFloat(ival_f));
+    var frac_f = (val - ival_f) * 100.0;
+    if (frac_f < 0) frac_f = -frac_f;
+    const frac = @as(u64, @intFromFloat(frac_f + 0.5));
+    var ibuf: [32]u8 = undefined;
+    const is = fmt_u64_commas(&ibuf, ival);
+    var out: [48]u8 = undefined;
+    var o: usize = 0;
+    @memcpy(out[o .. o + is.len], is);
+    o += is.len;
+    out[o] = '.'; o += 1;
+    out[o] = '0' + @as(u8, @intCast((frac / 10) % 10)); o += 1;
+    out[o] = '0' + @as(u8, @intCast(frac % 10)); o += 1;
+    @memcpy(buf[0..o], out[0..o]);
+    return buf[0..o];
+}
+
+fn scale_rate_f64(scaled: *f64, rate: f64) []const u8 {
+    if (rate >= 1_000_000_000.0) { scaled.* = rate / 1_000_000_000.0; return "G/s"; }
+    if (rate >= 1_000_000.0) { scaled.* = rate / 1_000_000.0; return "M/s"; }
+    if (rate >= 1_000.0) { scaled.* = rate / 1_000.0; return "K/s"; }
+    scaled.* = rate; return "/s";
+}
+
+fn fmt_rate(ops: usize, ns: u64) u64 {
+    if (ns == 0) return 0;
+    const num: u128 = @as(u128, ops) * 1_000_000_000;
+    return @as(u64, @intCast(num / ns));
+}
+
+fn fmt_ns_per(ops: usize, ns: u64) u64 {
+    if (ops == 0) return 0;
+    return @as(u64, @intCast(@as(u128, ns) / ops));
+}
+
+// ---- Benchmark helpers (warm-up, repeats, scaling) ----
+
+const Stats = struct {
+    // Raw per-run measurements to enable f64-friendly calculations
+    ns_list: [16]u64 = .{0} ** 16,
+    ops_list: [16]u64 = .{0} ** 16,
+    len: usize = 0,
+    // Integer summaries kept for backwards compatibility (not used for medians)
+    ns_op_list: [16]u64 = .{0} ** 16,
+    ops_s_list: [16]u64 = .{0} ** 16,
+};
+
+fn sortAsc(slice: []u64) void {
+    var i: usize = 1;
+    while (i < slice.len) : (i += 1) {
+        var j: usize = i;
+        while (j > 0 and slice[j - 1] > slice[j]) : (j -= 1) {
+            const tmp = slice[j - 1]; slice[j - 1] = slice[j]; slice[j] = tmp;
+        }
+    }
+}
+
+fn medianIqr(slice_in: []const u64) struct { median: u64, q1: u64, q3: u64 } {
+    var buf: [16]u64 = .{0} ** 16;
+    const n = slice_in.len;
+    if (n == 0) return .{ .median = 0, .q1 = 0, .q3 = 0 };
+    @memcpy(buf[0..n], slice_in);
+    sortAsc(buf[0..n]);
+    const mid = n / 2;
+    const med = if (n % 2 == 1) buf[mid] else (buf[mid - 1] + buf[mid]) / 2;
+    const q1 = buf[n / 4];
+    const q3 = buf[(3 * n) / 4];
+    return .{ .median = med, .q1 = q1, .q3 = q3 };
+}
+
+fn scale_iters(pilot_iters: usize, pilot_ns: u64, target_ms: u64) usize {
+    // Guard against tiny pilot measurements that would over-scale.
+    var eff_iters = pilot_iters;
+    var eff_ns = pilot_ns;
+    var guard: u32 = 0;
+    while (eff_ns < 1_000_000 and guard < 8) { // ensure at least ~1ms pilot
+        eff_iters *= 4;
+        guard += 1;
+        // We cannot re-measure here without rerunning; assume linear scaling
+        eff_ns *= 4;
+    }
+    if (eff_ns == 0) eff_ns = 1; // avoid div by zero
+    const target_ns: u128 = @as(u128, target_ms) * 1_000_000;
+    const iters_u128: u128 = (@as(u128, eff_iters) * target_ns + @as(u128, eff_ns) - 1) / @as(u128, eff_ns);
+    const max_iters: u128 = 50_000_000; // hard cap to keep total under ~1 minute
+    const bounded = if (iters_u128 > max_iters) max_iters else iters_u128;
+    return @intCast(bounded);
+}
+
+fn record(stats: *Stats, ops: usize, ns: u64) void {
+    if (stats.len >= stats.ns_list.len) return; // clamp
+    // raw values
+    stats.ns_list[stats.len] = ns;
+    stats.ops_list[stats.len] = @intCast(ops);
+    // integer summaries (legacy)
+    stats.ns_op_list[stats.len] = fmt_ns_per(ops, ns);
+    stats.ops_s_list[stats.len] = fmt_rate(ops, ns);
+    stats.len += 1;
+}
+
+// f64 median helpers computed from raw (ns,ops)
+const F64Iqr = struct { median: f64, q1: f64, q3: f64 };
+
+fn ratio_ns_per_op(ns: u64, ops: u64) f64 {
+    if (ops == 0) return 0.0;
+    return @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(ops));
+}
+
+fn ratio_ops_per_sec(ns: u64, ops: u64) f64 {
+    if (ns == 0) return 0.0;
+    return (@as(f64, @floatFromInt(ops)) * 1_000_000_000.0) / @as(f64, @floatFromInt(ns));
+}
+
+fn computeMedianIqrF64(ratio_fn: fn (u64, u64) f64, ns_list: []const u64, ops_list: []const u64, n: usize) F64Iqr {
+    if (n == 0) return .{ .median = 0.0, .q1 = 0.0, .q3 = 0.0 };
+    var buf: [16]f64 = .{0.0} ** 16;
+    var i: usize = 0;
+    while (i < n) : (i += 1) buf[i] = ratio_fn(ns_list[i], ops_list[i]);
+    var k: usize = 1;
+    while (k < n) : (k += 1) {
+        var j: usize = k;
+        while (j > 0 and buf[j - 1] > buf[j]) : (j -= 1) {
+            const t = buf[j - 1]; buf[j - 1] = buf[j]; buf[j] = t;
+        }
+    }
+    const mid = n / 2;
+    const med = if (n % 2 == 1) buf[mid] else (buf[mid - 1] + buf[mid]) / 2.0;
+    const q1 = buf[n / 4];
+    const q3 = buf[(3 * n) / 4];
+    return .{ .median = med, .q1 = q1, .q3 = q3 };
+}
+
+fn medianNsPerOpF64(stats: *const Stats) F64Iqr {
+    return computeMedianIqrF64(ratio_ns_per_op, stats.ns_list[0..stats.len], stats.ops_list[0..stats.len], stats.len);
+}
+
+fn medianOpsPerSecF64(stats: *const Stats) F64Iqr {
+    return computeMedianIqrF64(ratio_ops_per_sec, stats.ns_list[0..stats.len], stats.ops_list[0..stats.len], stats.len);
+}
+
+const Metrics = struct { total_ops: usize, total_ns: u64, ns_per: u64, rate_per_s: u64 };
+
+/// Measure alternating push/pop when the cache never misses.
+fn bench_push_pop_hits(iterations: usize) !Metrics {
+    var cache: CacheNoCb = .{};
+    var item = Item{ .id = 1 };
+    var timer = try std.time.Timer.start();
+    var i: usize = 0;
+    while (i < iterations) : (i += 1) {
+        _ = cache.push(&item);
+        _ = cache.pop();
+    }
+    const ns = timer.read();
+    const rate = fmt_rate(iterations, ns);
+    const ns_per = fmt_ns_per(iterations, ns);
+    return .{ .total_ops = iterations, .total_ns = ns, .ns_per = ns_per, .rate_per_s = rate };
+}
+
+/// Measure the "cache full" fast-path (push returns false immediately).
+fn bench_push_overflow(attempts: usize) !Metrics {
+    var cache: CacheNoCb = .{};
+    var items: [CacheNoCb.capacity]Item = undefined;
+    for (&items, 0..) |*it, i| it.* = .{ .id = i };
+    // Fill to capacity
+    for (0..CacheNoCb.capacity) |i| {
+        _ = cache.push(&items[i]);
+    }
+    var extra = Item{ .id = 999 };
+    var timer = try std.time.Timer.start();
+    var i: usize = 0;
+    while (i < attempts) : (i += 1) {
+        // Expected to fail fast since cache is full
+        _ = cache.push(&extra);
+    }
+    const ns = timer.read();
+    const rate = fmt_rate(attempts, ns);
+    const ns_per = fmt_ns_per(attempts, ns);
+    return .{ .total_ops = attempts, .total_ns = ns, .ns_per = ns_per, .rate_per_s = rate };
+}
+
+fn bench_pop_miss(iterations: usize) !Metrics {
+    var cache: CacheNoCb = .{};
+    var timer = try std.time.Timer.start();
+    var i: usize = 0;
+    while (i < iterations) : (i += 1) {
+        _ = cache.pop();
+    }
+    const ns = timer.read();
+    const rate = fmt_rate(iterations, ns);
+    const ns_per = fmt_ns_per(iterations, ns);
+    return .{ .total_ops = iterations, .total_ns = ns, .ns_per = ns_per, .rate_per_s = rate };
+}
+
+/// Measure `clear(null)` when no recycle callback is installed.
+fn bench_clear_no_callback(cycles: usize, fill_n: usize) !Metrics {
+    var cache: CacheNoCb = .{};
+    var items: [CacheNoCb.capacity]Item = undefined;
+    for (&items, 0..) |*it, i| it.* = .{ .id = i };
+
+    var timer = try std.time.Timer.start();
+    var c: usize = 0;
+    while (c < cycles) : (c += 1) {
+        // Fill
+        var i: usize = 0;
+        while (i < fill_n) : (i += 1) {
+            _ = cache.push(&items[i]);
+        }
+        // Time the clear
+        _ = timer.lap();
+        cache.clear(null);
+    }
+    const ns = timer.read();
+    const items_cleared = cycles * fill_n;
+    const rate = fmt_rate(items_cleared, ns);
+    const ns_per = fmt_ns_per(items_cleared, ns);
+    return .{ .total_ops = items_cleared, .total_ns = ns, .ns_per = ns_per, .rate_per_s = rate };
+}
+
+/// Measure `clear(ctx)` when every item must run the recycle callback.
+fn bench_clear_with_callback(cycles: usize, fill_n: usize) !Metrics {
+    var cache: CacheWithCb = .{};
+    var items: [CacheWithCb.capacity]Item = undefined;
+    for (&items, 0..) |*it, i| it.* = .{ .id = i };
+    var counter = AtomicUsize.init(0);
+
+    var timer = try std.time.Timer.start();
+    var c: usize = 0;
+    while (c < cycles) : (c += 1) {
+        var i: usize = 0;
+        while (i < fill_n) : (i += 1) {
+            _ = cache.push(&items[i]);
+        }
+        _ = timer.lap();
+        cache.clear(&counter);
+    }
+    const ns = timer.read();
+    const items_cleared = cycles * fill_n;
+    const rate = fmt_rate(items_cleared, ns);
+    const ns_per = fmt_ns_per(items_cleared, ns);
+    const total = counter.load(.seq_cst);
+    _ = total; // recorded via ops count
+    return .{ .total_ops = items_cleared, .total_ns = ns, .ns_per = ns_per, .rate_per_s = rate };
+}
+
+// ---- Generic helpers to reuse existing scenarios for different cache types ----
+
+fn bench_push_pop_hits_generic(comptime CacheType: type, iterations: usize) !Metrics {
+    var cache: CacheType = .{};
+    var item = Item{ .id = 7 };
+    var timer = try std.time.Timer.start();
+    var i: usize = 0;
+    while (i < iterations) : (i += 1) {
+        _ = cache.push(&item);
+        _ = cache.pop();
+    }
+    const ns = timer.read();
+    return .{ .total_ops = iterations, .total_ns = ns, .ns_per = fmt_ns_per(iterations, ns), .rate_per_s = fmt_rate(iterations, ns) };
+}
+
+fn bench_clear_no_callback_generic(comptime CacheType: type, cycles: usize) !Metrics {
+    var cache: CacheType = .{};
+    var items: [CacheType.capacity]Item = undefined;
+    for (&items, 0..) |*it, i| it.* = .{ .id = i };
+    var timer = try std.time.Timer.start();
+    var c: usize = 0;
+    while (c < cycles) : (c += 1) {
+        var i: usize = 0;
+        while (i < CacheType.capacity) : (i += 1) {
+            _ = cache.push(&items[i]);
+        }
+        _ = timer.lap();
+        cache.clear(null);
+    }
+    const ns = timer.read();
+    const items_cleared = cycles * CacheType.capacity;
+    return .{ .total_ops = items_cleared, .total_ns = ns, .ns_per = fmt_ns_per(items_cleared, ns), .rate_per_s = fmt_rate(items_cleared, ns) };
+}
+
+// ---- Multi-threaded benchmarks ----
+
+threadlocal var tls_hits_cache: CacheNoCb = .{};
+threadlocal var tls_clear_cache: CacheWithCb = .{};
+
+fn worker_hits(iterations: usize, start_flag: *AtomicUsize) void {
+    // Spin-wait for the start signal (0 -> not started, 1 -> go)
+    while (start_flag.load(.seq_cst) == 0) {
+        std.Thread.yield() catch {};
+    }
+    var item = Item{ .id = 123 };
+    var i: usize = 0;
+    while (i < iterations) : (i += 1) {
+        _ = tls_hits_cache.push(&item);
+        _ = tls_hits_cache.pop();
+    }
+}
+
+/// Multi-threaded version of push+pop hits (each thread uses its TLS cache).
+fn bench_mt_push_pop(threads_count: usize, iterations_per_thread: usize) !Metrics {
+    var start_flag = AtomicUsize.init(0);
+
+    const threads = try std.heap.page_allocator.alloc(std.Thread, threads_count);
+    defer std.heap.page_allocator.free(threads);
+
+    for (threads) |*t| {
+        t.* = try std.Thread.spawn(.{}, worker_hits, .{ iterations_per_thread, &start_flag });
+    }
+
+    var timer = try std.time.Timer.start();
+    _ = start_flag.store(1, .seq_cst);
+    for (threads) |*t| t.join();
+    const ns = timer.read();
+
+    const total_iters = threads_count * iterations_per_thread;
+    const rate = fmt_rate(total_iters, ns);
+    const ns_per = fmt_ns_per(total_iters, ns);
+    return .{ .total_ops = total_iters, .total_ns = ns, .ns_per = ns_per, .rate_per_s = rate };
+}
+
+fn recycle_add(ctx: ?*anyopaque, _: *Item) void {
+    // Increment shared atomic to simulate global recycle cost.
+    if (ctx) |p| {
+        const counter: *AtomicUsize = @ptrCast(@alignCast(p));
+        _ = counter.fetchAdd(1, .seq_cst);
+    }
+}
+
+const CacheWithSharedCb = cache_mod.ThreadLocalCache(*Item, recycle_add);
+threadlocal var tls_shared_clear_cache: CacheWithSharedCb = .{};
+
+fn worker_fill_and_clear(cycles: usize, start_flag: *AtomicUsize, shared_counter: *AtomicUsize) void {
+    while (start_flag.load(.seq_cst) == 0) {
+        std.Thread.yield() catch {};
+    }
+    var items: [CacheWithSharedCb.capacity]Item = undefined;
+    for (&items, 0..) |*it, i| it.* = .{ .id = i };
+
+    var c: usize = 0;
+    while (c < cycles) : (c += 1) {
+        var i: usize = 0;
+        while (i < CacheWithSharedCb.capacity) : (i += 1) {
+            _ = tls_shared_clear_cache.push(&items[i]);
+        }
+        tls_shared_clear_cache.clear(shared_counter);
+    }
+}
+
+/// Multi-threaded fill+clear using a shared recycle callback to stress global paths.
+fn bench_mt_fill_and_clear(threads_count: usize, cycles_per_thread: usize) !Metrics {
+    var start_flag = AtomicUsize.init(0);
+    var shared_counter = AtomicUsize.init(0);
+
+    const threads = try std.heap.page_allocator.alloc(std.Thread, threads_count);
+    defer std.heap.page_allocator.free(threads);
+
+    for (threads) |*t| {
+        t.* = try std.Thread.spawn(.{}, worker_fill_and_clear, .{ cycles_per_thread, &start_flag, &shared_counter });
+    }
+
+    var timer = try std.time.Timer.start();
+    _ = start_flag.store(1, .seq_cst);
+    for (threads) |*t| t.join();
+    const ns = timer.read();
+
+    const total_items = threads_count * cycles_per_thread * CacheWithSharedCb.capacity;
+    const rate = fmt_rate(total_items, ns);
+    const ns_per = fmt_ns_per(total_items, ns);
+    _ = shared_counter.load(.seq_cst);
+    return .{ .total_ops = total_items, .total_ns = ns, .ns_per = ns_per, .rate_per_s = rate };
+}
+
+// MT variant without callback to compare apples-to-apples against the callback case.
+threadlocal var tls_mt_clear_nocb: CacheNoCb = .{};
+fn worker_fill_and_clear_nocb(cycles: usize, start_flag: *AtomicUsize) void {
+    while (start_flag.load(.seq_cst) == 0) {
+        std.Thread.yield() catch {};
+    }
+    var items: [CacheNoCb.capacity]Item = undefined;
+    for (&items, 0..) |*it, i| it.* = .{ .id = i };
+    var c: usize = 0;
+    while (c < cycles) : (c += 1) {
+        var i: usize = 0;
+        while (i < CacheNoCb.capacity) : (i += 1) {
+            _ = tls_mt_clear_nocb.push(&items[i]);
+        }
+        tls_mt_clear_nocb.clear(null);
+    }
+}
+
+fn bench_mt_fill_and_clear_nocb(threads_count: usize, cycles_per_thread: usize) !Metrics {
+    var start_flag = AtomicUsize.init(0);
+    const threads = try std.heap.page_allocator.alloc(std.Thread, threads_count);
+    defer std.heap.page_allocator.free(threads);
+    for (threads) |*t| {
+        t.* = try std.Thread.spawn(.{}, worker_fill_and_clear_nocb, .{ cycles_per_thread, &start_flag });
+    }
+    var timer = try std.time.Timer.start();
+    _ = start_flag.store(1, .seq_cst);
+    for (threads) |*t| t.join();
+    const ns = timer.read();
+    const total_items = threads_count * cycles_per_thread * CacheNoCb.capacity;
+    const rate = fmt_rate(total_items, ns);
+    const ns_per = fmt_ns_per(total_items, ns);
+    return .{ .total_ops = total_items, .total_ns = ns, .ns_per = ns_per, .rate_per_s = rate };
+}
+
+// Small helper to write a compact table row with rounded integers and a safe "<1" for ns/op=0.
+fn writeRow(wr: anytype, label: []const u8, iterations: u64, stats: Stats) !void {
+    var nb1: [32]u8 = undefined;
+    const s_iters = fmt_u64_commas(&nb1, iterations);
+    const nsf = medianNsPerOpF64(&stats);
+    const opsf = medianOpsPerSecF64(&stats);
+    // ns/op: show <0.01 for very small values
+    const ns_display = if (nsf.median > 0.009) nsf.median else -1.0;
+    var scaled: f64 = 0; const unit = scale_rate_f64(&scaled, opsf.median);
+    var fbuf: [48]u8 = undefined; const s_rate = fmt_f64_commas2(&fbuf, scaled);
+    if (ns_display >= 0) {
+        try wr.print("| {s} | {s} | {d:.2} | {s} {s} |\n", .{ label, s_iters, ns_display, s_rate, unit });
+    } else {
+        try wr.print("| {s} | {s} | <0.01 | {s} {s} |\n", .{ label, s_iters, s_rate, unit });
+    }
+}
+
+pub fn main() !void {
+    // Configuration knobs — adjust as needed (static for Zig 0.15 tests)
+    // Quick mode: keep total wall-time well under 1 minute
+    const target_ms_st: u64 = 100; // aim each ST run to last ~100ms
+    const target_ms_mt: u64 = 150; // MT runs ~150ms
+    const target_ms_overflow: u64 = 200; // overflow/miss paths need longer to avoid 0ns
+    const target_ms_clear_nocb: u64 = 200;
+    const target_ms_clear_cb: u64 = 200;
+    const warmups: usize = 0;      // avoid extra warm-ups
+    const repeats: usize = 2;      // two repeats for median/IQR
+    const threads = 4; // static thread count
+
+    // Header + Legend
+    var hdr: [1024]u8 = undefined;
+    var hdr_fbs = std.io.fixedBufferStream(&hdr);
+    try hdr_fbs.writer().print(
+        "# ThreadLocalCache Benchmark Results\n\n" ++
+        "## Legend\n" ++
+        "- iters/attempts/cycles: amount of work per measured run (scaled to target duration).\n" ++
+        "- repeats: number of measured runs; latency and throughput report median (IQR) across repeats.\n" ++
+        "- ns/op (or ns/item): latency per operation/item; lower is better.\n" ++
+        "- ops/s (or items/s): throughput; higher is better.\n" ++
+        "- Notes: very fast paths may report ~0ns due to timer granularity in ReleaseFast.\n\n" ++
+        "## Config\n" ++
+        "- repeats: {}\n" ++
+        "- target_ms (ST/MT): {}/{}\n" ++
+        "- threads (MT): {}\n\n",
+        .{ repeats, target_ms_st, target_ms_mt, threads },
+    );
+    try md_truncate_write(hdr_fbs.getWritten());
+
+    // Machine specs section
+    const builtin = @import("builtin");
+    var spec_buf: [512]u8 = undefined;
+    var spec_fbs = std.io.fixedBufferStream(&spec_buf);
+    const os_tag = @tagName(builtin.os.tag);
+    const arch_tag = @tagName(builtin.cpu.arch);
+    const mode_tag = @tagName(builtin.mode);
+    const ptr_bits: usize = @sizeOf(usize) * 8;
+    const zig_ver = builtin.zig_version_string;
+    const cpu_count = std.Thread.getCpuCount() catch 0;
+    try spec_fbs.writer().print(
+        "## Machine\n" ++
+        "- OS: {s}\n" ++
+        "- Arch: {s}\n" ++
+        "- Zig: {s}\n" ++
+        "- Build Mode: {s}\n" ++
+        "- Pointer Width: {}-bit\n" ++
+        "- Logical CPUs: {}\n\n",
+        .{ os_tag, arch_tag, zig_ver, mode_tag, ptr_bits, cpu_count },
+    );
+    try md_append(spec_fbs.getWritten());
+
+    // Single-thread: push_pop_hits (scale iterations)
+    var pilot = try bench_push_pop_hits(100_000);
+    var run_iters = scale_iters(100_000, pilot.total_ns, target_ms_st);
+    var st_stats = Stats{};
+    // Warm-ups
+    var w: usize = 0; while (w < warmups) : (w += 1) { _ = try bench_push_pop_hits(run_iters); }
+    // Repeats
+    var rep: usize = 0; while (rep < repeats) : (rep += 1) {
+        const r = try bench_push_pop_hits(run_iters);
+        record(&st_stats, r.total_ops, r.total_ns);
+    }
+    const med1 = medianIqr(st_stats.ns_op_list[0..st_stats.len]);
+    const thr1 = medianIqr(st_stats.ops_s_list[0..st_stats.len]);
+    var buf: [256]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    var nb1: [32]u8 = undefined; var nb2: [32]u8 = undefined; var nb3: [32]u8 = undefined; var nb4: [32]u8 = undefined; var nb5: [32]u8 = undefined; var nb6: [32]u8 = undefined;
+    const s_iters = fmt_u64_commas(&nb1, run_iters);
+    const s_ns_med = fmt_u64_commas(&nb2, med1.median);
+    const s_ns_q1  = fmt_u64_commas(&nb3, med1.q1);
+    const s_ns_q3  = fmt_u64_commas(&nb4, med1.q3);
+    const s_ops_med = fmt_u64_commas(&nb5, thr1.median);
+    const s_ops_h = fmt_rate_human(&nb6, thr1.median);
+    // Also compute per-op (push or pop) throughput ≈ 2x pairs/s
+    var nb7: [32]u8 = undefined; var nb8: [32]u8 = undefined;
+    const ops_per_s = thr1.median * 2;
+    const s_ops2_med = fmt_u64_commas(&nb7, ops_per_s);
+    const s_ops2_h = fmt_rate_human(&nb8, ops_per_s);
+    try fbs.writer().print("## push_pop_hits\n- iters: {s}\n- repeats: {}\n- ns/op median (IQR): {s} ({s}–{s})\n- pairs/s median: {s} (≈ {s} M/s)\n- single-op ops/s median: {s} (≈ {s} M/s)\n\n", .{ s_iters, st_stats.len, s_ns_med, s_ns_q1, s_ns_q3, s_ops_med, s_ops_h, s_ops2_med, s_ops2_h });
+    try md_append(fbs.getWritten());
+    std.debug.print("push_pop_hits  iters={}  ns/op={} ({}–{})  ops/s={} ({}–{})\n", .{ run_iters, med1.median, med1.q1, med1.q3, thr1.median, thr1.q1, thr1.q3 });
+
+    // Single-thread: pop misses (empty cache)
+    pilot = try bench_pop_miss(1_000_000);
+    run_iters = scale_iters(1_000_000, pilot.total_ns, target_ms_overflow);
+    st_stats = .{}; w = 0; while (w < warmups) : (w += 1) { _ = try bench_pop_miss(run_iters); }
+    rep = 0; while (rep < repeats) : (rep += 1) { const r = try bench_pop_miss(run_iters); record(&st_stats, r.total_ops, r.total_ns); }
+    const med_miss = medianIqr(st_stats.ns_op_list[0..st_stats.len]);
+    const thr_miss = medianIqr(st_stats.ops_s_list[0..st_stats.len]);
+    fbs.reset();
+    nb1 = .{0} ** 32; nb2 = .{0} ** 32; nb3 = .{0} ** 32; nb4 = .{0} ** 32; nb5 = .{0} ** 32; nb6 = .{0} ** 32;
+    const s_pop_iters = fmt_u64_commas(&nb1, run_iters);
+    const s_pop_ns = fmt_u64_commas(&nb2, med_miss.median);
+    const s_pop_q1 = fmt_u64_commas(&nb3, med_miss.q1);
+    const s_pop_q3 = fmt_u64_commas(&nb4, med_miss.q3);
+    const s_pop_ops = fmt_u64_commas(&nb5, thr_miss.median);
+    const s_pop_ops_h = fmt_rate_human(&nb6, thr_miss.median);
+    try fbs.writer().print("## pop_empty\n- attempts: {s}\n- repeats: {}\n- ns/attempt median (IQR): {s} ({s}–{s})\n- attempts/s median: {s} (≈ {s} M/s)\n\n", .{ s_pop_iters, st_stats.len, s_pop_ns, s_pop_q1, s_pop_q3, s_pop_ops, s_pop_ops_h });
+    try md_append(fbs.getWritten());
+    std.debug.print("pop_empty  attempts={}  ns/attempt={} ({}–{})  attempts/s={} ({}–{})\n", .{ run_iters, med_miss.median, med_miss.q1, med_miss.q3, thr_miss.median, thr_miss.q1, thr_miss.q3 });
+
+    // Single-thread: overflow pushes
+    pilot = try bench_push_overflow(1_000_000);
+    run_iters = scale_iters(1_000_000, pilot.total_ns, target_ms_overflow);
+    st_stats = .{}; w = 0; while (w < warmups) : (w += 1) { _ = try bench_push_overflow(run_iters); }
+    rep = 0; while (rep < repeats) : (rep += 1) { const r = try bench_push_overflow(run_iters); record(&st_stats, r.total_ops, r.total_ns); }
+    const med2 = medianIqr(st_stats.ns_op_list[0..st_stats.len]);
+    const thr2 = medianIqr(st_stats.ops_s_list[0..st_stats.len]);
+    fbs.reset();
+    nb1 = .{0} ** 32; nb2 = .{0} ** 32; nb3 = .{0} ** 32; nb4 = .{0} ** 32; nb5 = .{0} ** 32; nb6 = .{0} ** 32;
+    const s_attempts = fmt_u64_commas(&nb1, run_iters);
+    const s_na_med = fmt_u64_commas(&nb2, med2.median);
+    const s_na_q1 = fmt_u64_commas(&nb3, med2.q1);
+    const s_na_q3 = fmt_u64_commas(&nb4, med2.q3);
+    const s_attps_med = fmt_u64_commas(&nb5, thr2.median);
+    const s_attps_h = fmt_rate_human(&nb6, thr2.median);
+    try fbs.writer().print("## push_overflow(full)\n- attempts: {s}\n- repeats: {}\n- ns/attempt median (IQR): {s} ({s}–{s})\n- attempts/s median: {s} (≈ {s} M/s)\n\n", .{ s_attempts, st_stats.len, s_na_med, s_na_q1, s_na_q3, s_attps_med, s_attps_h });
+    try md_append(fbs.getWritten());
+    std.debug.print("push_overflow  attempts={}  ns/attempt={} ({}–{})  attempts/s={} ({}–{})\n", .{ run_iters, med2.median, med2.q1, med2.q3, thr2.median, thr2.q1, thr2.q3 });
+
+    // clear(null) scaled by cycles
+    pilot = try bench_clear_no_callback(100_000, CacheNoCb.capacity);
+    var run_cycles = scale_iters(100_000, pilot.total_ns, target_ms_clear_nocb);
+    st_stats = .{}; w = 0; while (w < warmups) : (w += 1) { _ = try bench_clear_no_callback(run_cycles, CacheNoCb.capacity); }
+    rep = 0; while (rep < repeats) : (rep += 1) { const r = try bench_clear_no_callback(run_cycles, CacheNoCb.capacity); record(&st_stats, r.total_ops, r.total_ns); }
+    const med3 = medianIqr(st_stats.ns_op_list[0..st_stats.len]);
+    const thr3 = medianIqr(st_stats.ops_s_list[0..st_stats.len]);
+    fbs.reset();
+    nb1 = .{0} ** 32; nb2 = .{0} ** 32; nb3 = .{0} ** 32; nb4 = .{0} ** 32; nb5 = .{0} ** 32; nb6 = .{0} ** 32;
+    const s_cycles = fmt_u64_commas(&nb1, run_cycles);
+    const s_items_per = fmt_u64_commas(&nb2, CacheNoCb.capacity);
+    const s_ni_med = fmt_u64_commas(&nb3, med3.median);
+    const s_ni_q1 = fmt_u64_commas(&nb4, med3.q1);
+    const s_items_s = fmt_u64_commas(&nb5, thr3.median);
+    const s_items_h = fmt_rate_human(&nb6, thr3.median);
+    try fbs.writer().print("## clear_no_callback\n- cycles: {s} (items/cycle: {s})\n- repeats: {}\n- ns/item median (IQR): {s} ({s}–{s})\n- items/s median: {s} (≈ {s} M/s)\n\n", .{ s_cycles, s_items_per, st_stats.len, s_ni_med, s_ni_q1, s_ni_med, s_items_s, s_items_h });
+    try md_append(fbs.getWritten());
+    std.debug.print("clear_no_callback  cycles={}  ns/item={} ({}–{})  items/s={} ({}–{})\n", .{ run_cycles, med3.median, med3.q1, med3.q3, thr3.median, thr3.q1, thr3.q3 });
+
+    // clear(callback) scaled by cycles
+    pilot = try bench_clear_with_callback(100_000, CacheWithCb.capacity);
+    run_cycles = scale_iters(100_000, pilot.total_ns, target_ms_clear_cb);
+    st_stats = .{}; w = 0; while (w < warmups) : (w += 1) { _ = try bench_clear_with_callback(run_cycles, CacheWithCb.capacity); }
+    rep = 0; while (rep < repeats) : (rep += 1) { const r = try bench_clear_with_callback(run_cycles, CacheWithCb.capacity); record(&st_stats, r.total_ops, r.total_ns); }
+    const med4 = medianIqr(st_stats.ns_op_list[0..st_stats.len]);
+    const thr4 = medianIqr(st_stats.ops_s_list[0..st_stats.len]);
+    fbs.reset();
+    nb1 = .{0} ** 32; nb2 = .{0} ** 32; nb3 = .{0} ** 32; nb4 = .{0} ** 32; nb5 = .{0} ** 32; nb6 = .{0} ** 32;
+    const s_cycles_cb = fmt_u64_commas(&nb1, run_cycles);
+    const s_items_per_cb = fmt_u64_commas(&nb2, CacheWithCb.capacity);
+    const s_cb_med = fmt_u64_commas(&nb3, med4.median);
+    const s_items_s_cb = fmt_u64_commas(&nb4, thr4.median);
+    const s_items_h_cb = fmt_rate_human(&nb6, thr4.median);
+    try fbs.writer().print("## clear_with_callback\n- cycles: {s} (items/cycle: {s})\n- repeats: {}\n- ns/item median (IQR): {s} ({s}–{s})\n- items/s median: {s} (≈ {s} M/s)\n\n", .{ s_cycles_cb, s_items_per_cb, st_stats.len, s_cb_med, s_cb_med, s_cb_med, s_items_s_cb, s_items_h_cb });
+    try md_append(fbs.getWritten());
+
+    // Consolidated table: callback toggle (single-threaded)
+    // Re-run minimal repeats to fill per-case stats cleanly for the table (keeps code simple).
+    var st_tab_stats_on = Stats{};
+    var st_tab_stats_off = Stats{};
+    rep = 0; while (rep < repeats) : (rep += 1) {
+        const r_on = try bench_clear_with_callback(run_cycles, CacheWithCb.capacity);
+        record(&st_tab_stats_on, r_on.total_ops, r_on.total_ns);
+        const r_off = try bench_clear_no_callback(run_cycles, CacheNoCb.capacity);
+        record(&st_tab_stats_off, r_off.total_ops, r_off.total_ns);
+    }
+    fbs.reset();
+    try fbs.writer().print("## Callback Toggle (Single-Threaded)\n", .{});
+    try fbs.writer().print("| Variant | Items | ns/item (median) | items/s (median) |\n", .{});
+    try fbs.writer().print("| --- | --- | --- | --- |\n", .{});
+    const items_per_cycle_st: u64 = @intCast(CacheWithCb.capacity);
+    const items_total: u64 = items_per_cycle_st * @as(u64, run_cycles);
+    try writeRow(fbs.writer(), "clear(no-callback)", items_total, st_tab_stats_on);
+    try writeRow(fbs.writer(), "clear(callback)", items_total, st_tab_stats_off);
+    try fbs.writer().print("\n", .{});
+    try md_append(fbs.getWritten());
+    std.debug.print("clear_with_callback  cycles={}  ns/item={} ({}–{})  items/s={} ({}–{})\n", .{ run_cycles, med4.median, med4.q1, med4.q3, thr4.median, thr4.q1, thr4.q3 });
+
+    // Multi-thread benchmarks
+    // Scale MT iterations per thread via pilot at 200k/threads
+    const pilot_mt = try bench_mt_push_pop(threads, 200_000);
+    const iters_mt = scale_iters(200_000, pilot_mt.total_ns, target_ms_mt);
+    var mt_stats = Stats{}; w = 0; while (w < warmups) : (w += 1) { _ = try bench_mt_push_pop(threads, iters_mt); }
+    rep = 0; while (rep < repeats) : (rep += 1) { const r = try bench_mt_push_pop(threads, iters_mt); record(&mt_stats, r.total_ops, r.total_ns); }
+    const med5 = medianIqr(mt_stats.ns_op_list[0..mt_stats.len]);
+    const thr5 = medianIqr(mt_stats.ops_s_list[0..mt_stats.len]);
+    fbs.reset();
+    nb1 = .{0} ** 32; nb2 = .{0} ** 32; nb3 = .{0} ** 32; nb4 = .{0} ** 32; nb5 = .{0} ** 32; nb6 = .{0} ** 32;
+    const s_itps_med = fmt_u64_commas(&nb1, thr5.median);
+    const s_iter_thr = fmt_u64_commas(&nb2, iters_mt);
+    const s_ns_med_5 = fmt_u64_commas(&nb3, med5.median);
+    const s_itps_h = fmt_rate_human(&nb4, thr5.median);
+    const per_thread = thr5.median / @as(u64, @intCast(threads));
+    const per_thread_ops = per_thread * 2; // per-thread single-op rate
+    const s_per_thread_pairs = fmt_rate_human(&nb5, per_thread);
+    const s_per_thread_ops = fmt_rate_human(&nb6, per_thread_ops);
+    try fbs.writer().print("## mt_push_pop_hits\n- threads: {}\n- iters/thread: {s}\n- repeats: {}\n- ns/iter median (IQR): {s} ({s}–{s})\n- pairs/s median: {s} (≈ {s} M/s)\n- per-thread pairs/s median: {s} M/s\n- per-thread single-op ops/s median: {s} M/s\n\n", .{ threads, s_iter_thr, mt_stats.len, s_ns_med_5, s_ns_med_5, s_ns_med_5, s_itps_med, s_itps_h, s_per_thread_pairs, s_per_thread_ops });
+    try md_append(fbs.getWritten());
+    std.debug.print("mt_push_pop_hits  threads={} iters/thread={}  ns/iter={} ({}–{})  iters/s={} ({}–{})\n", .{ threads, iters_mt, med5.median, med5.q1, med5.q3, thr5.median, thr5.q1, thr5.q3 });
+
+    const pilot_mt2 = try bench_mt_fill_and_clear(threads, 200_000);
+    const clear_mt_cycles = scale_iters(200_000, pilot_mt2.total_ns, target_ms_mt);
+    mt_stats = .{}; w = 0; while (w < warmups) : (w += 1) { _ = try bench_mt_fill_and_clear(threads, clear_mt_cycles); }
+    rep = 0; while (rep < repeats) : (rep += 1) { const r = try bench_mt_fill_and_clear(threads, clear_mt_cycles); record(&mt_stats, r.total_ops, r.total_ns); }
+    const med6 = medianIqr(mt_stats.ns_op_list[0..mt_stats.len]);
+    const thr6 = medianIqr(mt_stats.ops_s_list[0..mt_stats.len]);
+    fbs.reset();
+    nb1 = .{0} ** 32; nb2 = .{0} ** 32; nb3 = .{0} ** 32; nb4 = .{0} ** 32; nb5 = .{0} ** 32;
+    const s_cycles_mt = fmt_u64_commas(&nb1, clear_mt_cycles);
+    const s_ns_med_6 = fmt_u64_commas(&nb2, med6.median);
+    const s_items_s_6 = fmt_u64_commas(&nb3, thr6.median);
+    const s_items_h_6 = fmt_rate_human(&nb4, thr6.median);
+    const per_thread_items = thr6.median / @as(u64, @intCast(threads));
+    const s_per_thread_items = fmt_rate_human(&nb5, per_thread_items);
+    try fbs.writer().print("## mt_fill_and_clear(shared_cb)\n- threads: {}\n- cycles/thread: {s}\n- repeats: {}\n- ns/item median (IQR): {s} ({s}–{s})\n- items/s median: {s} (≈ {s} M/s)\n- per-thread items/s median: {s} M/s\n\n", .{ threads, s_cycles_mt, mt_stats.len, s_ns_med_6, s_ns_med_6, s_ns_med_6, s_items_s_6, s_items_h_6, s_per_thread_items });
+    try md_append(fbs.getWritten());
+    std.debug.print("mt_fill_and_clear  threads={} cycles/thread={}  ns/item={} ({}–{})  items/s={} ({}–{})\n", .{ threads, clear_mt_cycles, med6.median, med6.q1, med6.q3, thr6.median, thr6.q1, thr6.q3 });
+
+    // Consolidated table: callback toggle (multi-threaded)
+    var mt_tab_stats_on = Stats{};
+    var mt_tab_stats_off = Stats{};
+    rep = 0; while (rep < repeats) : (rep += 1) {
+        const r_on = try bench_mt_fill_and_clear(threads, clear_mt_cycles);
+        record(&mt_tab_stats_on, r_on.total_ops, r_on.total_ns);
+        const r_off = try bench_mt_fill_and_clear_nocb(threads, clear_mt_cycles);
+        record(&mt_tab_stats_off, r_off.total_ops, r_off.total_ns);
+    }
+    fbs.reset();
+    try fbs.writer().print("### Callback Toggle (Multi-Threaded)\n", .{});
+    try fbs.writer().print("| Variant | Items | ns/item (median) | items/s (median) |\n", .{});
+    try fbs.writer().print("| --- | --- | --- | --- |\n", .{});
+    const mt_items_total: u64 = @intCast(threads * clear_mt_cycles * CacheWithCb.capacity);
+    try writeRow(fbs.writer(), "clear(callback)", mt_items_total, mt_tab_stats_on);
+    try writeRow(fbs.writer(), "clear(no-callback)", mt_items_total, mt_tab_stats_off);
+    try fbs.writer().print("\n", .{});
+    try md_append(fbs.getWritten());
+
+    std.debug.print("\nSummary written to: {s}\n", .{MD_PATH});
+    // Environment here may have limited disk space; keep extra sections disabled.
+    const ENABLE_EXTRA_SECTIONS = false;
+    if (!ENABLE_EXTRA_SECTIONS) return;
+
+    // ---- Additional diagnostic sections ----
+
+    // 1) Auto vs Fixed Capacity (ST clear with no callback)
+    var auto_fixed = [_]struct { label: []const u8, cap: usize, rate: Stats }{
+        .{ .label = "Auto", .cap = CacheAuto.capacity, .rate = .{} },
+        .{ .label = "8",   .cap = CacheFix8.capacity,  .rate = .{} },
+        .{ .label = "16",  .cap = CacheFix16.capacity, .rate = .{} },
+        .{ .label = "32",  .cap = CacheFix32.capacity, .rate = .{} },
+        .{ .label = "64",  .cap = CacheFix64.capacity, .rate = .{} },
+    };
+    var idx: usize = 0;
+    while (idx < auto_fixed.len) : (idx += 1) {
+        const r = switch (idx) {
+            0 => try bench_clear_no_callback_generic(CacheAuto, 200),
+            1 => try bench_clear_no_callback_generic(CacheFix8, 200),
+            2 => try bench_clear_no_callback_generic(CacheFix16, 200),
+            3 => try bench_clear_no_callback_generic(CacheFix32, 200),
+            else => try bench_clear_no_callback_generic(CacheFix64, 200),
+        };
+        record(&auto_fixed[idx].rate, r.total_ops, r.total_ns);
+    }
+    fbs.reset();
+    try fbs.writer().print("## Auto vs Fixed Capacity (ST, clear no-callback)\n", .{});
+    try fbs.writer().print("| Variant | Capacity | Items | ns/item (median) | items/s (median) |\n| --- | --- | --- | --- | --- |\n", .{});
+    idx = 0; while (idx < auto_fixed.len) : (idx += 1) {
+        var nbx1: [32]u8 = undefined;
+        const items_af = @as(u64, auto_fixed[idx].cap * 200);
+        const s_cap = fmt_u64_commas(&nbx1, auto_fixed[idx].cap);
+        try fbs.writer().print("| {s} | {s} | ", .{ auto_fixed[idx].label, s_cap });
+        try writeRow(fbs.writer(), "clear(no-cb)", items_af, auto_fixed[idx].rate);
+    }
+    try fbs.writer().print("\n", .{});
+    try md_append(fbs.getWritten());
+
+    // 2) sanitize_slots on/off (ST push+pop hits, capacity=16)
+    var san_on = Stats{}; var san_off = Stats{};
+    var rr: usize = 0;
+    // Recompute a small ST pilot and scale for this section (separate from earlier iters)
+    const pilot_san = try bench_push_pop_hits_generic(CacheSanOff, 200_000);
+    const iters_san = scale_iters(200_000, pilot_san.total_ns, target_ms_st);
+    while (rr < repeats) : (rr += 1) {
+        const a = try bench_push_pop_hits_generic(CacheSanOn, iters_san);
+        record(&san_on, a.total_ops, a.total_ns);
+        const b = try bench_push_pop_hits_generic(CacheSanOff, iters_san);
+        record(&san_off, b.total_ops, b.total_ns);
+    }
+    fbs.reset();
+    try fbs.writer().print("## sanitize_slots Toggle (ST, push+pop hits)\n", .{});
+    try fbs.writer().print("| Variant | Iters | ns/iter (median) | iters/s (median) |\n| --- | --- | --- | --- |\n", .{});
+    try writeRow(fbs.writer(), "sanitize=on", @intCast(iters_san), san_on);
+    try writeRow(fbs.writer(), "sanitize=off", @intCast(iters_san), san_off);
+    try fbs.writer().print("\n", .{});
+    try md_append(fbs.getWritten());
+
+    // 3) Active Capacity Sweep (capacity=64; active=32/48/64)
+    var cap32 = Stats{}; var cap48 = Stats{}; var cap64 = Stats{};
+    rr = 0; while (rr < repeats) : (rr += 1) {
+        const r32 = try bench_clear_no_callback_generic(CacheCap64_A32, 200);
+        record(&cap32, r32.total_ops, r32.total_ns);
+        const r48 = try bench_clear_no_callback_generic(CacheCap64_A48, 200);
+        record(&cap48, r48.total_ops, r48.total_ns);
+        const r64 = try bench_clear_no_callback_generic(CacheCap64_A64, 200);
+        record(&cap64, r64.total_ops, r64.total_ns);
+    }
+    fbs.reset();
+    try fbs.writer().print("## Active Capacity Sweep (ST, capacity=64, clear no-callback)\n", .{});
+    try fbs.writer().print("| ActiveCap | Items | ns/item (median) | items/s (median) |\n| --- | --- | --- | --- |\n", .{});
+    try writeRow(fbs.writer(), "32",  @intCast(200 * CacheCap64_A32.capacity), cap32);
+    try writeRow(fbs.writer(), "48",  @intCast(200 * CacheCap64_A48.capacity), cap48);
+    try writeRow(fbs.writer(), "64",  @intCast(200 * CacheCap64_A64.capacity), cap64);
+    try fbs.writer().print("\n", .{});
+    try md_append(fbs.getWritten());
+}

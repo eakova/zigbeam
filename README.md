@@ -12,46 +12,65 @@ Dependency graph/flow: [docs/utils/dependency_graph.md](docs/utils/dependency_gr
 - Atomic smart pointer with Small Value Optimization (SVO) and weak references
 - Import: `@import("zig_beam").Utils.Arc`
 - Samples: `zig build samples-arc`
-- Source: [utils/src/arc/arc.zig](utils/src/arc/arc.zig)
-- Unit tests: [utils/src/arc/_arc_unit_tests.zig](utils/src/arc/_arc_unit_tests.zig)
-- Integration tests: [utils/src/arc/_arc_integration_tests.zig](utils/src/arc/_arc_integration_tests.zig)
-- Bench: `zig build bench-arc` [docs/utils/arc_benchmark_results.md](docs/utils/arc_benchmark_results.md)
+- Source: [src/libs/arc/arc.zig](src/libs/arc/arc.zig)
+- Tests: `zig build test-arc`
+- Bench: `zig build bench-arc` → [ARC_BENCHMARKS.md](src/libs/arc/ARC_BENCHMARKS.md)
 
 #### Arc Pool
-- Reuse `Arc(T).Inner` allocations; fronted by a ThreadLocalCache and a global Treiber stack
+- Reuse `Arc(T).Inner` allocations; fronted by ThreadLocalCache and global Treiber stack
 - Import: `@import("zig_beam").Utils.ArcPool`
 - Samples: (covered in Arc samples)
-- Source: [utils/src/arc/arc-pool/arc_pool.zig](utils/src/arc/arc-pool/arc_pool.zig)
-- Unit tests: [utils/src/arc/arc-pool/_arc_pool_unit_tests.zig](utils/src/arc/arc-pool/_arc_pool_unit_tests.zig)
-- Integration tests: [utils/src/arc/arc-pool/_arc_pool_integration_tests.zig](utils/src/arc/arc-pool/_arc_pool_integration_tests.zig)
-- Bench: `zig build bench-arc` [docs/utils/arc_benchmark_results.md](docs/utils/arc_benchmark_results.md)
-
-#### Thread‑Local Cache
-- Per‑thread, lock‑free L1 pool to reduce allocator pressure and contention
-- Import: `@import("zig_beam").Utils.ThreadLocalCache`
-- Samples: `zig build samples-tlc`
-- Source: [utils/src/thread-local-cache/thread_local_cache.zig](utils/src/thread-local-cache/thread_local_cache.zig)
-- Unit tests: [utils/src/thread-local-cache/_thread_local_cache_unit_tests.zig](utils/src/thread-local-cache/_thread_local_cache_unit_tests.zig)
-- Integration tests: [utils/src/thread-local-cache/_thread_local_cache_integration_test.zig](utils/src/thread-local-cache/_thread_local_cache_integration_test.zig)
-- Bench: `zig build bench-tlc` [docs/utils/thread_local_cache_benchmark_results.md](docs/utils/thread_local_cache_benchmark_results.md)
-
-#### Tagged Pointer
-- Pack a small tag into a pointer’s low bits (common for lightweight flags)
-- Import: `@import("zig_beam").Utils.TaggedPointer`
-- Samples: `zig build samples-tagged`
-- Source: [utils/src/tagged-pointer/tagged_pointer.zig](utils/src/tagged-pointer/tagged_pointer.zig)
-- Unit tests: [utils/src/tagged-pointer/_tagged_pointer_unit_tests.zig](utils/src/tagged-pointer/_tagged_pointer_unit_tests.zig)
-- Integration tests: [utils/src/tagged-pointer/_tagged_pointer_integration_tests.zig](utils/src/tagged-pointer/_tagged_pointer_integration_tests.zig)
-- Bench: —
+- Source: [src/libs/arc/arc-pool/arc_pool.zig](src/libs/arc/arc-pool/arc_pool.zig)
+- Tests: `zig build test-arc-pool`
+- Bench: `zig build bench-arc-pool` → [ARC_POOL_BENCHMARKS.md](src/libs/arc/ARC_POOL_BENCHMARKS.md)
 
 #### Cycle Detector
-- Debug utility to find unreachable cycles of Arcs using a user‑provided trace function
+- Debug utility to find unreachable Arc cycles using a user-provided trace function
 - Import: `@import("zig_beam").Utils.ArcCycleDetector`
-- Samples: —
-- Source: [utils/src/arc/cycle-detector/arc_cycle_detector.zig](utils/src/arc/cycle-detector/arc_cycle_detector.zig)
-- Unit tests: [utils/src/arc/cycle-detector/_arc_cycle_detector_unit_tests.zig](utils/src/arc/cycle-detector/_arc_cycle_detector_unit_tests.zig)
-- Integration tests: [utils/src/arc/cycle-detector/_arc_cycle_detector_integration_tests.zig](utils/src/arc/cycle-detector/_arc_cycle_detector_integration_tests.zig)
-- Bench: —
+- Source: [src/libs/arc/cycle-detector/arc_cycle_detector.zig](src/libs/arc/cycle-detector/arc_cycle_detector.zig)
+- Tests: `zig build test-arc-cycle`
+
+#### Thread-Local Cache
+- Per-thread, lock-free L1 pool to reduce allocator pressure and contention
+- Import: `@import("zig_beam").Utils.ThreadLocalCache`
+- Samples: `zig build samples-tlc`
+- Source: [src/libs/thread-local-cache/thread_local_cache.zig](src/libs/thread-local-cache/thread_local_cache.zig)
+- Tests: `zig build test-tlc`
+- Bench: `zig build bench-tlc` → [BENCHMARKS.md](src/libs/thread-local-cache/BENCHMARKS.md)
+
+#### Tagged Pointer
+- Pack a small tag into a pointer's low bits (common for lightweight flags)
+- Import: `@import("zig_beam").Utils.TaggedPointer`
+- Samples: `zig build samples-tagged`
+- Source: [src/libs/tagged-pointer/tagged_pointer.zig](src/libs/tagged-pointer/tagged_pointer.zig)
+- Tests: `zig build test-tagged`
+
+#### Epoch-Based Reclamation (EBR)
+- Lock-free memory reclamation for concurrent data structures
+- Import: `@import("zig_beam").Utils.EBR`
+- Samples: `zig build samples-ebr`
+- Source: [src/libs/ebr/ebr.zig](src/libs/ebr/ebr.zig)
+- Tests: `zig build test-ebr`
+- Bench: `zig build bench-ebr`
+
+#### DVyukov MPMC Queue
+- Lock-free bounded Multi-Producer Multi-Consumer queue (Dmitry Vyukov's algorithm)
+- **Performance**: 20-100 Mops/s under high contention (industry-standard)
+- Import: `@import("zig_beam").Utils.DVyukovMPMCQueue`
+- Samples: `zig build samples-dvyukov`
+- Source: [src/libs/dvyukov-mpmc-queue/dvyukov_mpmc_queue.zig](src/libs/dvyukov-mpmc-queue/dvyukov_mpmc_queue.zig)
+- Tests: `zig build test-dvyukov`
+- Bench: `zig build bench-dvyukov` → [BENCHMARKS.md](src/libs/dvyukov-mpmc-queue/BENCHMARKS.md)
+
+#### Sharded DVyukov MPMC Queue
+- High-performance variant distributing contention across multiple independent queues
+- **Performance**: 100-133 Mops/s (2.5-6x faster than non-sharded under high contention)
+- **Use when**: 4+ producers AND 4+ consumers with balanced workload
+- Import: `@import("zig_beam").Utils.ShardedDVyukovMPMCQueue`
+- Samples: (covered in DVyukov samples)
+- Source: [src/libs/dvyukov-mpmc-queue/sharded_dvyukov_mpmc_queue.zig](src/libs/dvyukov-mpmc-queue/sharded_dvyukov_mpmc_queue.zig)
+- Tests: `zig build test-dvyukov`
+- Bench: `zig build bench-dvyukov` → [BENCHMARKS_SHARDED.md](src/libs/dvyukov-mpmc-queue/BENCHMARKS_SHARDED.md)
 
 ## Requirements
 
@@ -60,14 +79,13 @@ Dependency graph/flow: [docs/utils/dependency_graph.md](docs/utils/dependency_gr
 
 ## Libraries
 
-- `utils/` — Foundational utilities
-  - Arc smart pointer + pool + cycle detector
-  - Thread-local cache (lock-free L1 pool)
-  - Tagged pointer (bit-packed metadata)
+- `src/libs/` — Foundational utilities
+  - **Arc**: Smart pointer with Small Value Optimization + pool + cycle detector
+  - **Thread-Local Cache**: Lock-free per-thread L1 pool
+  - **Tagged Pointer**: Bit-packed metadata in pointer low bits
+  - **EBR**: Epoch-Based Reclamation for safe memory reclamation
+  - **DVyukov MPMC Queue**: Lock-free bounded queue (20-133 Mops/s)
   - Build targets: tests, samples, and benchmarks
-- `zig-rcu/` — Reserved for future libraries (or your own)
-
-Each library folder keeps its own `build.zig`, `src/`, and `docs/` (for reports).
 
 ## Usage
 
@@ -129,6 +147,27 @@ const alloc = gpa.allocator();
 var a = try Arc.init(alloc, 42); defer a.release();
 var b = a.clone(); defer b.release();
 // a.get().* == 42, b.get().* == 42
+```
+
+DVyukov MPMC Queue (enqueue/dequeue):
+```zig
+const beam = @import("zig_beam");
+const DVyukovMPMCQueue = beam.Utils.DVyukovMPMCQueue;
+const Queue = DVyukovMPMCQueue(u64, 1024); // u64 items, capacity 1024
+var gpa = std.heap.GeneralPurposeAllocator(.{}){}; defer _ = gpa.deinit();
+var queue = try Queue.init(gpa.allocator()); defer queue.deinit();
+
+// Producer: enqueue items
+queue.enqueue(42) catch |err| {
+    // Handle QueueFull error
+};
+
+// Consumer: dequeue items
+if (queue.dequeue()) |item| {
+    // Process item
+} else {
+    // Queue was empty
+}
 ```
 
 ## Use These Libraries In Your Project
@@ -195,9 +234,16 @@ pub fn main() !void {
     // Thread-local cache
     const ThreadLocalCache = beam.Utils.ThreadLocalCache;
 
-    // ARC core and pool
+    // Arc core and pool
     const Arc = beam.Utils.Arc;
     const ArcPool = beam.Utils.ArcPool;
+
+    // EBR (Epoch-Based Reclamation)
+    const EBR = beam.Utils.EBR;
+
+    // DVyukov MPMC Queue
+    const DVyukovMPMCQueue = beam.Utils.DVyukovMPMCQueue;
+    const ShardedDVyukovMPMCQueue = beam.Utils.ShardedDVyukovMPMCQueue;
 
     // minimal smoke check
     var gpa = std.heap.GeneralPurposeAllocator(.{}){}; defer _ = gpa.deinit();
@@ -209,35 +255,40 @@ pub fn main() !void {
 ```
 
 ## Notes
-- The `zig_beam` wrapper re-exports the utils library under `Utils` so a single import covers Tagged Pointer, Thread-Local Cache, Arc, Arc Pool, and Cycle Detector.
-- Reports are under `docs/utils/*.md`:
-  - Arc: docs/utils/arc_benchmark_results.md
-  - Thread-Local Cache: docs/utils/thread_local_cache_benchmark_results.md
-- If you prefer, you can depend on sub-libraries when they become separate packages; the wrapper is a convenient default today.
+- The `zig_beam` wrapper re-exports all libraries under `Utils` for easy access: Tagged Pointer, Thread-Local Cache, Arc, Arc Pool, Cycle Detector, EBR, and DVyukov MPMC Queue.
+- Benchmark reports are in each library's directory:
+  - Arc: [src/libs/arc/ARC_BENCHMARKS.md](src/libs/arc/ARC_BENCHMARKS.md)
+  - Arc Pool: [src/libs/arc/ARC_POOL_BENCHMARKS.md](src/libs/arc/ARC_POOL_BENCHMARKS.md)
+  - Thread-Local Cache: [src/libs/thread-local-cache/BENCHMARKS.md](src/libs/thread-local-cache/BENCHMARKS.md)
+  - DVyukov MPMC Queue: [src/libs/dvyukov-mpmc-queue/BENCHMARKS.md](src/libs/dvyukov-mpmc-queue/BENCHMARKS.md)
+  - Sharded DVyukov: [src/libs/dvyukov-mpmc-queue/BENCHMARKS_SHARDED.md](src/libs/dvyukov-mpmc-queue/BENCHMARKS_SHARDED.md)
 
-## Library: utils
+## Library Details
 
-The `utils` library groups several building blocks used together or separately.
+All libraries are in `src/libs/` and accessed via `@import("zig_beam").Utils`.
 
-- Tagged Pointer
-  - What: store a small tag in a pointer’s low bits
-  - Files: `utils/src/tagged-pointer/tagged_pointer.zig`
+- **Tagged Pointer**: Store a small tag in pointer's low bits
+  - Files: `src/libs/tagged-pointer/tagged_pointer.zig`
   - Run: `zig build test-tagged`, `zig build samples-tagged`
 
-- Thread-Local Cache
-  - What: fixed-size, per-thread cache that frontloads a global pool
-  - Files: `utils/src/thread-local-cache/thread_local_cache.zig`
+- **Thread-Local Cache**: Fixed-size, per-thread cache that frontloads a global pool
+  - Files: `src/libs/thread-local-cache/thread_local_cache.zig`
   - Run: `zig build test-tlc`, `zig build samples-tlc`, `zig build bench-tlc`
-  - Report: `docs/utils/thread_local_cache_benchmark_results.md`
+  - Report: [BENCHMARKS.md](src/libs/thread-local-cache/BENCHMARKS.md)
 
-- ARC (Atomic Reference Counted)
-  - What: thread-safe smart pointers with SVO for small types, weak refs, and a pool
-  - Files: `utils/src/arc/arc.zig`, `utils/src/arc/arc-pool/arc_pool.zig`, `utils/src/arc/cycle-detector/arc_cycle_detector.zig`
+- **Arc (Atomic Reference Counted)**: Thread-safe smart pointers with SVO, weak refs, and pool
+  - Files: `src/libs/arc/arc.zig`, `src/libs/arc/arc-pool/arc_pool.zig`, `src/libs/arc/cycle-detector/arc_cycle_detector.zig`
   - Run: `zig build test-arc`, `zig build test-arc-pool`, `zig build test-arc-cycle`, `zig build samples-arc`, `zig build bench-arc`
-  - MT run: `ARC_BENCH_RUN_MT=1 zig build bench-arc`
-  - Report: `docs/utils/arc_benchmark_results.md`
+  - Reports: [ARC_BENCHMARKS.md](src/libs/arc/ARC_BENCHMARKS.md), [ARC_POOL_BENCHMARKS.md](src/libs/arc/ARC_POOL_BENCHMARKS.md)
 
-See `utils/README.md` for module-level details and commands.
+- **EBR (Epoch-Based Reclamation)**: Lock-free memory reclamation for concurrent data structures
+  - Files: `src/libs/ebr/ebr.zig`
+  - Run: `zig build test-ebr`, `zig build samples-ebr`, `zig build bench-ebr`
+
+- **DVyukov MPMC Queue**: Lock-free bounded queue with sharded variant for high contention
+  - Files: `src/libs/dvyukov-mpmc-queue/dvyukov_mpmc_queue.zig`, `src/libs/dvyukov-mpmc-queue/sharded_dvyukov_mpmc_queue.zig`
+  - Run: `zig build test-dvyukov`, `zig build samples-dvyukov`, `zig build bench-dvyukov`
+  - Reports: [BENCHMARKS.md](src/libs/dvyukov-mpmc-queue/BENCHMARKS.md), [BENCHMARKS_SHARDED.md](src/libs/dvyukov-mpmc-queue/BENCHMARKS_SHARDED.md)
 
 ## Benchmarks
 

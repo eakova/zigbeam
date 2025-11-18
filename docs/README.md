@@ -76,7 +76,7 @@ ARC_BENCH_RUN_MT=1 zig build bench-arc  # also enables multi-thread benchmark
 ```
 
 Docs
-- Report: [`docs/utils/arc_benchmark_results.md`](../docs/arc_benchmark_results.md)
+- Report: [`src/libs/arc/ARC_BENCHMARKS.md`](../src/libs/arc/ARC_BENCHMARKS.md)
 - Dependency & interaction: [`docs/utils/dependency_graph.md`](../docs/dependency_graph.md)
 
 Minimal example

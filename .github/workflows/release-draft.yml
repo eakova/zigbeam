@@ -30,7 +30,8 @@ jobs:
           This is a draft release generated from tag ${TAG}.
 
           ## Reports
-          - Arc benchmarks: docs/utils/arc_benchmark_results.md
+          - Arc benchmarks: src/libs/arc/ARC_BENCHMARKS.md
+          - ArcPool benchmarks: src/libs/arc/ARC_POOL_BENCHMARKS.md
           - Thread‑Local Cache benchmarks: docs/utils/thread_local_cache_benchmark_results.md
           - Dependency graph: docs/utils/dependency_graph.md
 
@@ -62,3 +63,4 @@ jobs:
           body_path: ${{ steps.body.outputs.path }}
           files: |
             docs/utils/*.md
+            src/libs/arc/*.md
