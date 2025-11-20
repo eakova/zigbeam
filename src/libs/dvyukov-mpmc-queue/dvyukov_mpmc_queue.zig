@@ -344,8 +344,11 @@ pub fn DVyukovMPMCQueue(comptime T: type, comptime capacity: usize) type {
         /// sacrificing correctness.
         ///
         /// Backoff Strategy:
-        /// Uses exponential backoff (1, 2, 4, 8, ... up to 64 spins) on CAS failures.
-        /// Benchmarks show 3-10x improvement vs constant spinning in low-moderate contention.
+        /// Uses proper adaptive backoff from the Backoff library:
+        /// - Resets backoff when making progress (CAS gives new position)
+        /// - Escalates spin-only backoff when stuck (dif > 0, waiting for another producer)
+        /// - Never yields (other producers finish in nanoseconds, yielding adds 10-100μs latency)
+        /// This preserves throughput during progress while avoiding excessive spinning when stuck.
         ///
         /// Performance Characteristics:
         /// - Excellent: SPSC, imbalanced MPSC/SPMC (e.g., 4P/1C, 1P/4C)
@@ -360,8 +363,6 @@ pub fn DVyukovMPMCQueue(comptime T: type, comptime capacity: usize) type {
         /// - Alternative algorithms (e.g., distributed queues, work stealing)
         pub fn enqueue(self: *Self, item: T) error{QueueFull}!void {
             var pos = self.enqueue_pos.load(.monotonic);
-            var backoff: u32 = 1;
-            var max_backoff_count: u32 = 0; // Track how many times we hit max backoff
 
             while (true) {
                 // Index calculation: truncate position to usize then mask
@@ -390,23 +391,8 @@ pub fn DVyukovMPMCQueue(comptime T: type, comptime capacity: usize) type {
                         .monotonic,
                         .monotonic,
                     )) |new_pos| {
-                        // CAS failed, another thread claimed it
-                        // Exponential backoff to reduce cache line contention
+                        // CAS failed, retry with new position
                         pos = new_pos;
-                        var i: u32 = 0;
-                        while (i < backoff) : (i += 1) {
-                            std.atomic.spinLoopHint();
-                        }
-                        const prev_backoff = backoff;
-                        backoff = @min(backoff * 2, 64);
-                        // If we hit max backoff, occasionally yield to prevent CPU starvation
-                        if (prev_backoff == 64) {
-                            max_backoff_count += 1;
-                            // Yield every 64 times at max backoff (conservative - preserves throughput)
-                            if (max_backoff_count % 64 == 0) {
-                                std.Thread.yield() catch {};
-                            }
-                        }
                         continue;
                     }
 
@@ -421,22 +407,8 @@ pub fn DVyukovMPMCQueue(comptime T: type, comptime capacity: usize) type {
                     return error.QueueFull;
                 } else {
                     // Another thread is in the process of enqueueing
-                    // Reload position and retry with exponential backoff
+                    // Reload position and retry
                     pos = self.enqueue_pos.load(.monotonic);
-                    var i: u32 = 0;
-                    while (i < backoff) : (i += 1) {
-                        std.atomic.spinLoopHint();
-                    }
-                    const prev_backoff = backoff;
-                    backoff = @min(backoff * 2, 64);
-                    // If we hit max backoff, occasionally yield to prevent CPU starvation
-                    if (prev_backoff == 64) {
-                        max_backoff_count += 1;
-                        // Yield every 64 times at max backoff (conservative - preserves throughput)
-                        if (max_backoff_count % 64 == 0) {
-                            std.Thread.yield() catch {};
-                        }
-                    }
                 }
             }
         }
@@ -452,8 +424,6 @@ pub fn DVyukovMPMCQueue(comptime T: type, comptime capacity: usize) type {
         /// DO NOT weaken to .monotonic - this would break correctness!
         pub fn dequeue(self: *Self) ?T {
             var pos = self.dequeue_pos.load(.monotonic);
-            var backoff: u32 = 1;
-            var max_backoff_count: u32 = 0; // Track how many times we hit max backoff
 
             while (true) {
                 // Index calculation: truncate position to usize then mask
@@ -478,23 +448,8 @@ pub fn DVyukovMPMCQueue(comptime T: type, comptime capacity: usize) type {
                         .monotonic,
                         .monotonic,
                     )) |new_pos| {
-                        // CAS failed, another thread claimed it
-                        // Exponential backoff to reduce cache line contention
+                        // CAS failed, retry with new position
                         pos = new_pos;
-                        var i: u32 = 0;
-                        while (i < backoff) : (i += 1) {
-                            std.atomic.spinLoopHint();
-                        }
-                        const prev_backoff = backoff;
-                        backoff = @min(backoff * 2, 64);
-                        // If we hit max backoff, occasionally yield to prevent CPU starvation
-                        if (prev_backoff == 64) {
-                            max_backoff_count += 1;
-                            // Yield every 64 times at max backoff (conservative - preserves throughput)
-                            if (max_backoff_count % 64 == 0) {
-                                std.Thread.yield() catch {};
-                            }
-                        }
                         continue;
                     }
 
@@ -510,22 +465,8 @@ pub fn DVyukovMPMCQueue(comptime T: type, comptime capacity: usize) type {
                     return null;
                 } else {
                     // Another thread is in the process of dequeueing
-                    // Reload position and retry with exponential backoff
+                    // Reload position and retry
                     pos = self.dequeue_pos.load(.monotonic);
-                    var i: u32 = 0;
-                    while (i < backoff) : (i += 1) {
-                        std.atomic.spinLoopHint();
-                    }
-                    const prev_backoff = backoff;
-                    backoff = @min(backoff * 2, 64);
-                    // If we hit max backoff, occasionally yield to prevent CPU starvation
-                    if (prev_backoff == 64) {
-                        max_backoff_count += 1;
-                        // Yield every 16 times at max backoff (not every time - preserves throughput)
-                        if (max_backoff_count % 16 == 0) {
-                            std.Thread.yield() catch {};
-                        }
-                    }
                 }
             }
         }

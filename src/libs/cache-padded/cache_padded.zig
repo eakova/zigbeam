@@ -26,37 +26,10 @@ pub const CachePadded = struct {
     // ================================================================
     // COMPTIME ARCH-BASED CACHE LINE (for align())
     // ================================================================
+    /// Use std.atomic.cache_line as the single source of truth for
+    /// the architectural cache line size used for alignment.
     fn archLine() usize {
-        const arch = builtin.cpu.arch;
-
-        // x86 and AMD64 → 64 bytes
-        if (arch == .x86_64 or arch == .i386) return 64;
-
-        // Apple Silicon: we treat prefetch granularity as 128
-        if (arch == .aarch64 and isApple()) return 128;
-
-        // AArch64 server → 64 bytes is a solid default
-        if (arch == .aarch64) return 64;
-
-        // Embedded ARM → often 32 bytes
-        if (arch == .arm or arch == .thumb) return 32;
-
-        // RISC-V → 64 is a safe default in most designs
-        if (arch == .riscv64) return 64;
-
-        // PowerPC / SPARC / others → 64 as a conservative fallback
-        if (arch == .powerpc or arch == .powerpc64 or arch == .sparc)
-            return 64;
-
-        // Last-resort fallback
-        return 64;
-    }
-
-    fn isApple() bool {
-        return builtin.os.tag == .macos
-            or builtin.os.tag == .ios
-            or builtin.os.tag == .tvos
-            or builtin.os.tag == .watchos;
+        return std.atomic.cache_line;
     }
 
     // ================================================================
@@ -66,12 +39,11 @@ pub const CachePadded = struct {
         // Fast path: use cached value if already initialized.
         if (g_cached_line_size != 0) return g_cached_line_size;
 
-        var line: usize = archLine();
-        if (builtin.os.tag == .linux) {
-            if (detectSysfs()) |sz| {
-                line = sz;
-            }
-        }
+        // For production use, we avoid any filesystem access and rely
+        // solely on std.atomic.cache_line (via archLine()). This keeps
+        // initialization O(1) and prevents a sysfs read on the first
+        // Auto(T) usage per thread.
+        const line = archLine();
         g_cached_line_size = line;
         return line;
     }

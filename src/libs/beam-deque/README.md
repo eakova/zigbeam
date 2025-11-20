@@ -1,253 +1,262 @@
-# beam-deque
+# BeamDeque
 
-High-performance work-stealing data structures for Zig.
+High-performance bounded work-stealing deque for building task schedulers and thread pools in Zig.
 
 ## Overview
 
-This module provides two lock-free, bounded concurrent data structures:
+Work-stealing is a fundamental pattern in parallel computing where busy threads can "steal" work from idle threads. BeamDeque implements the Arora-Blumofe-Plaxton work-stealing algorithm with extreme performance optimizations.
 
-- **BeamDeque**: A Single-Producer, Multi-Consumer (SPMC) work-stealing deque
-- **BeamDequeChannel**: A Multi-Producer, Multi-Consumer (MPMC) channel built on top of BeamDeque
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    BeamDeque Architecture                       │
+└─────────────────────────────────────────────────────────────────┘
 
-Both are designed for high-throughput, low-latency concurrent systems like thread pools and work schedulers.
+    Owner Thread (Worker)          Thief Threads (Stealers)
+         │                                    │
+         │ push()                             │ steal()
+         ▼                                    ▼
+    ┌────────────────────────────────────────────┐
+    │     [5]  [4]  [3]  [2]  [1]  [ ]  [ ]     │  Ring Buffer
+    └────────────────────────────────────────────┘
+         ▲                          ▲
+         │                          │
+       tail                       head
+    (push/pop here)         (steal from here)
+         │                          │
+         │                          │
+    LIFO for owner             FIFO for thieves
+    (cache locality)          (work distribution)
 
-## Quick Start
 
-### BeamDeque (SPMC Work-Stealing Deque)
+    Owner operations:               Thief operations:
+    ┌────────────┐                 ┌────────────┐
+    │ push(item) │ ~2-5ns          │   steal()  │ ~20-50ns
+    │   pop()    │ ~3-10ns         └────────────┘
+    └────────────┘
+```
+
+## Usage
 
 ```zig
-const std = @import("std");
 const BeamDeque = @import("beam_deque").BeamDeque;
 
-// Initialize with power-of-2 capacity
-const result = try BeamDeque(Task).init(allocator, 1024);
+// Initialize with power-of-two capacity
+const result = try BeamDeque(*Task).init(allocator, 1024);
 defer result.worker.deinit();
 
-// Owner thread (single producer, single consumer)
-try result.worker.push(task);           // LIFO push
-if (result.worker.pop()) |task| { }     // LIFO pop
+// Owner thread - push and pop (LIFO)
+try result.worker.push(task);
+if (result.worker.pop()) |task| {
+    // Process task with cache locality
+}
 
-// Thief threads (many consumers, read-only)
+// Thief threads - steal work (FIFO)
 // Pass result.stealer to other threads
-if (result.stealer.steal()) |task| { }  // FIFO steal
+if (stealer.steal()) |task| {
+    // Got work from another thread
+}
 ```
 
-**Performance**: ~5-15ns per operation (owner), ~20-50ns per steal (thieves)
+## Features
 
-### BeamDequeChannel (MPMC Channel)
+### Core API
+
+**Initialization:**
+- **`BeamDeque(T).init(allocator, capacity)`** - Create deque (capacity must be power-of-two)
+
+**Worker (Owner Thread):**
+- **`worker.push(item)`** - Push to bottom (~2-5ns, no CAS)
+- **`worker.pop()`** - Pop from bottom (~3-10ns, LIFO for cache locality)
+- **`worker.deinit()`** - Free resources
+- **`worker.size()`** - Get approximate size (racy)
+- **`worker.isEmpty()`** - Check if empty (racy)
+- **`worker.capacity()`** - Get capacity
+
+**Stealer (Thief Threads):**
+- **`stealer.steal()`** - Steal from top (~20-50ns, FIFO work distribution)
+- **`stealer.size()`** - Get approximate size (racy)
+- **`stealer.isEmpty()`** - Check if empty (racy)
+
+### Performance Characteristics
+
+- **Owner push**: O(1), ~2-5ns - no CAS, just release store
+- **Owner pop**: O(1), ~3-10ns - CAS only for last item race
+- **Thief steal**: O(1), ~20-50ns - acquire loads + CAS
+- **Cache-line aligned** - head/tail on separate cache lines (no false sharing)
+- **Exponential backoff** - reduces contention between competing thieves
+
+### Design Principles
+
+- **SPMC pattern** - Single Producer, Multiple Consumers
+- **Bounded capacity** - Fixed-size ring buffer (returns `error.Full`)
+- **Arora-Blumofe-Plaxton** - Proven work-stealing algorithm
+- **Type safety** - Compile-time error for large types (use pointers instead)
+- **Zero allocation** - All operations are wait-free/lock-free
+
+### Common Patterns
 
 ```zig
-const std = @import("std");
+// Pattern 1: Thread pool task queue
+const TaskDeque = BeamDeque(*Task);
+var result = try TaskDeque.init(allocator, 256);
+
+// Worker thread processes own tasks (LIFO - good for cache)
+while (running) {
+    if (result.worker.pop()) |task| {
+        task.execute();
+    } else {
+        // No local work, try stealing
+        std.Thread.yield();
+    }
+}
+
+// Pattern 2: Recursive work splitting (divide-and-conquer)
+fn processRecursive(deque: *Worker, work: Work) !void {
+    if (work.size < THRESHOLD) {
+        work.process();
+        return;
+    }
+
+    // Split work
+    const left, const right = work.split();
+
+    // Push right half for potential stealing
+    try deque.push(right);
+
+    // Process left half immediately (cache-friendly)
+    try processRecursive(deque, left);
+
+    // Reclaim right half if not stolen
+    if (deque.pop()) |right_work| {
+        try processRecursive(deque, right_work);
+    }
+}
+
+// Pattern 3: Multi-thief work stealing scheduler
+fn thief_worker(stealer: Stealer, workers: []Stealer) void {
+    while (running) {
+        // Try stealing from all workers in round-robin
+        for (workers) |other| {
+            if (other.steal()) |task| {
+                task.execute();
+                break;
+            }
+        }
+        std.Thread.yield();
+    }
+}
+```
+
+## BeamDequeChannel - MPMC Work-Stealing Channel
+
+**BeamDequeChannel** is a higher-level abstraction built on BeamDeque that provides a simple MPMC (Multiple Producer, Multiple Consumer) channel with automatic work-stealing and load balancing.
+
+### Architecture
+
+```
+┌────────────────────────────────────────────────────────────┐
+│              BeamDequeChannel Architecture                 │
+└────────────────────────────────────────────────────────────┘
+
+Worker 0          Worker 1          Worker 2          Worker N
+  │                 │                 │                 │
+  │ send()          │ send()          │ send()          │ send()
+  ▼                 ▼                 ▼                 ▼
+┌──────┐        ┌──────┐        ┌──────┐        ┌──────┐
+│Deque │        │Deque │        │Deque │   ...  │Deque │  Local
+│ [5] │        │ [3] │        │ [8] │        │ [2] │  Deques
+└──────┘        └──────┘        └──────┘        └──────┘  (Fast Path)
+  │  ▲            │  ▲            │  ▲            │  ▲
+  │  └────────────┼──┼────────────┼──┘  Steal    │  │
+  │               │  │            │  ◄────────────┘  │
+  │               │  │            │                  │
+  └───────────────┴──┴────────────┴──────────────────┘
+                     │
+                     ▼
+              ┌──────────────┐
+              │Global Queue  │  Overflow
+              │[items...]    │  (Safety Valve)
+              └──────────────┘
+
+recv() priority:
+  1. Local deque (LIFO, cache-friendly)
+  2. Global queue (FIFO, shared work)
+  3. Steal from random worker (FIFO, load balancing)
+```
+
+### Key Features
+
+- **Zero-contention fast path**: Each worker sends to its own local deque
+- **Automatic load balancing**: Idle workers steal from busy workers
+- **Back-pressure**: Bounded capacity with `error.Full` when saturated
+- **Work-stealing**: Random victim selection distributes stealing load evenly
+
+### Usage
+
+```zig
 const BeamDequeChannel = @import("beam_deque_channel").BeamDequeChannel;
 
-// Create channel with 8 workers
-const Channel = BeamDequeChannel(Task, 256, 4096);
-const result = try Channel.init(allocator, 8);
+// Create channel with 8 workers, local capacity 256, global capacity 4096
+const Channel = BeamDequeChannel(*Task, 256, 4096);
+var result = try Channel.init(allocator, 8);
 defer result.channel.deinit(&result.workers);
 
-// CRITICAL: Each worker should be BOTH producer AND consumer
-// Worker thread loop (correct pattern):
-while (running) {
-    // Send to own local deque (fast path: ~2.5ns)
-    try result.workers[worker_id].send(task);
+// Producer thread (any worker can send)
+try result.workers[0].send(task);
 
-    // Receive from own deque, global queue, or steal (priority order)
-    if (result.workers[worker_id].recv()) |task| {
-        process(task);
-    }
+// Consumer thread (any worker can receive)
+if (result.workers[1].recv()) |task| {
+    // Process task with cache locality
 }
 ```
 
-**Performance**: ~2.5ns per operation (local), scales to 1.95B ops/sec with 8 workers (4.8x), up to 3.37B ops/sec with adaptive backoff (7.1x)
+### Performance Characteristics
 
-## Architecture
+- **Send fast path**: ~5-15ns (local deque push, no contention)
+- **Send slow path**: ~50-100ns (batch offload to global queue when local is full)
+- **Recv from local**: ~5-15ns (LIFO pop, excellent cache locality)
+- **Recv from global**: ~30-60ns (FIFO dequeue from shared queue)
+- **Recv via steal**: ~40-80ns (FIFO steal from random victim)
 
-### BeamDeque: The Foundation
+### Learn More
 
-Based on the Arora-Blumofe-Plaxton algorithm:
+See [docs/BEAM_DEQUE_CHANNEL.md](docs/BEAM_DEQUE_CHANNEL.md) for detailed architecture and implementation design.
 
-- **Owner**: Exclusive access to push/pop (LIFO stack for cache locality)
-- **Thieves**: Concurrent steal access (FIFO queue, load balancing)
-- **Cache-optimized**: Cache-line padding prevents false sharing
-- **Memory ordering**: Carefully tuned acquire/release/seq_cst semantics
-
-### BeamDequeChannel: The High-Level API
-
-Built on BeamDeque with three-tier priority:
-
-1. **Local deque** (LIFO, ~2.5ns): Each worker's private deque
-2. **Global queue** (FIFO, ~30-60ns): Overflow buffer using DVyukovMPMCQueue
-3. **Work-stealing** (FIFO, ~20-50ns): Steal from other workers' deques
-
-**Key Design**: Workers are **both producers and consumers**, maximizing local deque usage.
-
-## Performance Characteristics
-
-### BeamDeque Benchmarks
-
-- Owner push: ~75M ops/sec (13ns per op)
-- Owner pop: ~75M ops/sec (13ns per op)
-- Single thief steal: ~40M ops/sec (24ns per op)
-- 8 concurrent thieves: ~8.8M ops/sec (113ns per op with backoff)
-
-### BeamDequeChannel Benchmarks
-
-**Correct Usage** (each worker is producer + consumer):
-
-| Workers | Throughput | Per-op | Scaling |
-|---------|------------|--------|---------|
-| 1 | 405M ops/sec | 2.5ns | 1.0x |
-| 4 | 1.72B ops/sec | 0.58ns | 4.25x |
-| 8 | 1.95B ops/sec | 0.51ns | 4.8x |
-
-*With adaptive backoff: 8 workers achieve 3.37B ops/sec (7.1x scaling)*
-
-**Incorrect Usage** (dedicated producers/consumers): **30-60x slower!**
-- 4P/4C: Only 28M items/sec (vs 861M items/sec correct usage)
-- 8P/8C: Only 29M items/sec (vs 975M items/sec correct usage)
-
-See [BENCHMARK_ANALYSIS.md](docs/BENCHMARK_ANALYSIS.md) for detailed analysis.
-
-## Correct Usage Patterns
-
-###  DO: Worker is Both Producer and Consumer
-
-```zig
-// Each worker sends to itself and receives from itself (or steals)
-fn workerThread(worker: *Worker, worker_id: usize) void {
-    while (running) {
-        // Generate work (or receive from external source)
-        const task = generateTask();
-
-        // Send to OWN local deque (fast!)
-        try worker.send(task);
-
-        // Receive from OWN local deque first, steal if empty
-        if (worker.recv()) |task| {
-            process(task);
-        }
-    }
-}
-```
-
-**Why this works**: Maximizes local deque usage (~2.5ns operations), work-stealing balances load automatically.
-
-### L DON'T: Dedicated Producer/Consumer Threads
-
-```zig
-// WRONG: Dedicated producer threads
-fn producerThread(worker: *Worker) void {
-    while (running) {
-        try worker.send(task);  // Always fills local � overflows to global
-    }
-}
-
-// WRONG: Dedicated consumer threads
-fn consumerThread(worker: *Worker) void {
-    while (running) {
-        if (worker.recv()) |task| {  // Always empty � always steals/global
-            process(task);
-        }
-    }
-}
-```
-
-**Why this fails**: Local deques never used effectively, every operation hits slow path (30-60x slower).
-
-## API Reference
-
-### BeamDeque
-
-```zig
-pub fn BeamDeque(comptime T: type) type
-
-// Initialization
-pub fn init(allocator: Allocator, capacity: usize) !InitResult
-// Returns: { worker: Worker, stealer: Stealer }
-
-// Worker (owner thread only)
-pub fn push(item: T) !void           // Error: Full
-pub fn pop() ?T                       // null if empty
-pub fn size() usize                   // Approximate (racy)
-pub fn isEmpty() bool                 // Approximate (racy)
-pub fn deinit()                       // Cleanup
-
-// Stealer (any thread, thread-safe)
-pub fn steal() ?T                     // null if empty or lost race
-pub fn size() usize                   // Approximate (racy)
-pub fn isEmpty() bool                 // Approximate (racy)
-```
-
-### BeamDequeChannel
-
-```zig
-pub fn BeamDequeChannel(
-    comptime T: type,
-    comptime local_capacity: usize,   // Per-worker deque size (power of 2)
-    comptime global_capacity: usize,  // Overflow queue size (power of 2)
-) type
-
-// Initialization
-pub fn init(allocator: Allocator, num_workers: usize) !InitResult
-// Returns: { channel: *Channel, workers: []Worker }
-
-// Worker API (all thread-safe)
-pub fn send(item: T) !void            // Error: Full (system saturated)
-pub fn recv() ?T                      // null if no work available
-pub fn size() usize                   // Local deque size
-pub fn isEmpty() bool                 // Local deque empty
-pub fn deinit()                       // Worker cleanup
-
-// Channel cleanup
-pub fn deinit(workers: []Worker)      // Full cleanup
-```
-
-## Compile-Time Validation
-
-Types larger than 64 bytes (cache line size) must use pointers:
-
-```zig
-//  OK: Small type
-const result = try BeamDeque(u64).init(allocator, 256);
-
-//  OK: Pointer to large type
-const LargeTask = struct { data: [256]u8 };
-const result = try BeamDeque(*LargeTask).init(allocator, 256);
-
-// L Compile error: Type too large
-const result = try BeamDeque(LargeTask).init(allocator, 256);
-// Error: Type 'LargeTask' (256 bytes) exceeds cache line size (64 bytes).
-//        Use *LargeTask instead for better performance.
-```
-
-## Design Documentation
-
-- [BEAM_DEQUE.md](docs/BEAM_DEQUE.md) - SPMC deque design and algorithm
-- [BEAM_DEQUE_CHANNEL.md](docs/BEAM_DEQUE_CHANNEL.md) - MPMC channel architecture
-- [BENCHMARK_ANALYSIS.md](docs/BENCHMARK_ANALYSIS.md) - Performance analysis and patterns
-
-## Testing
+## Build Commands
 
 ```bash
-# Run all tests
-zig build test-beam-deque -Doptimize=ReleaseFast
+# Run BeamDeque tests
+zig build test-beam-deque
 
-# Run benchmarks
-zig build bench-beam-deque
-zig build bench-beam-deque-channel-v2
+# Run BeamDeque benchmarks
+zig build bench-beam-deque -Doptimize=ReleaseFast
 
-# Run race condition tests (thorough, takes time)
-zig build test-beam-deque -Doptimize=ReleaseFast
+# Run BeamDequeChannel tests
+zig build test-beam-deque-channel
+
+# Run BeamDequeChannel benchmarks
+zig build bench-beam-deque-channel -Doptimize=ReleaseFast
+
+# Run BeamDequeChannel V2 benchmarks (optimized usage patterns)
+zig build bench-beam-deque-channel-v2 -Doptimize=ReleaseFast
 ```
 
-## Implementation Notes
+## Requirements
 
-- **Bounded**: Both structures have fixed capacity with back-pressure semantics
-- **Lock-free**: No mutexes or blocking operations
-- **Memory ordering**: Carefully tuned for correctness and performance
-- **Cache-aware**: Explicit cache-line padding prevents false sharing
-- **Backoff**: Exponential backoff reduces CAS contention under load
+- **Zig version**: 0.13.0 or later
+- **Platform**: Any platform supported by Zig's standard library
+- **Dependencies**: Part of [zig-beam](https://github.com/eakova/zig-beam)
+- **Constraints**: Capacity must be power-of-two, types > 64 bytes must be pointers
 
 ## License
 
-See repository root for license information.
+Licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](../../../LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](../../../LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.

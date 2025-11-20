@@ -7,15 +7,17 @@ const thread_local_cache = @import("thread_local_cache");
 const arc = @import("arc_core");
 const arc_pool = @import("arc_pool");
 const arc_cycle_detector = @import("arc_cycle_detector");
-const ebr = @import("epoch_based_reclamation");
 const backoff = @import("backoff");
 const dvyukov_mpmc_queue = @import("dvyukov_mpmc");
 const sharded_dvyukov_mpmc_queue = @import("sharded_dvyukov_mpmc");
 const beam_deque = @import("beam_deque");
 const beam_deque_channel = @import("beam_deque_channel");
+const spsc_queue = @import("spsc_queue");
+const segmented_queue = @import("segmented_queue");
 const deque = @import("deque");
 const deque_pool = @import("deque_pool");
 const task = @import("task");
+const beam_task = @import("beam_task");
 
 // Public entry under a single namespace. Consumers use:
 // const beam = @import("zig_beam");
@@ -41,18 +43,18 @@ pub const Libs = struct {
     // Beam Deque - High-Performance Work-Stealing
     pub const BeamDeque = beam_deque.BeamDeque;
     pub const BeamDequeChannel = beam_deque_channel.BeamDequeChannel;
+
+    // Bounded SPSC Queue - Lock-Free Point-to-Point Communication
+    pub const BoundedSPSCQueue = spsc_queue.BoundedSPSCQueue;
+
+    // Segmented Queue - Unbounded MPMC Queue with Dynamic Growth
+    pub const SegmentedQueue = segmented_queue.SegmentedQueue;
+
+    // BeamTask - Cancellable OS-thread task abstraction
+    pub const BeamTask = beam_task.Task;
 };
 
 pub const Protos = struct {
-    // Epoch-Based Reclamation (Prototype)
-    pub const EBR = ebr.EBR;
-    pub const ThreadState = ebr.ThreadState;
-    pub const Guard = ebr.Guard;
-    pub const pin = ebr.pin;
-    pub const AtomicPtr = ebr.AtomicPtr;
-    pub const RetiredNode = ebr.RetiredNode;
-    pub const RetiredList = ebr.RetiredList;
-
     // Work-Stealing Deque & Thread Pool (Legacy Prototypes)
     pub const WorkStealingDeque = deque.WorkStealingDeque;
     pub const WorkStealingPool = deque_pool.WorkStealingPool;

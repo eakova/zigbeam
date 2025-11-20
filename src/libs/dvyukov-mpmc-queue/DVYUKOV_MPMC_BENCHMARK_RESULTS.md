@@ -11,43 +11,43 @@ Performance measurements for the DVyukov bounded MPMC queue.
 
 | Scenario | Iterations | ns/op (median) | Throughput |
 |----------|------------|----------------|------------|
-| Capacity 64 | 100,000,000 | 1.74 | 576.26 M/s |
-| Capacity 256 | 100,000,000 | 1.73 | 579.26 M/s |
-| Capacity 1024 | 100,000,000 | 1.72 | 580.56 M/s |
-| Capacity 4096 | 100,000,000 | 1.82 | 548.23 M/s |
+| Capacity 64 | 100,000,000 | 1.56 | 639.31 M/s |
+| Capacity 256 | 100,000,000 | 1.55 | 644.26 M/s |
+| Capacity 1024 | 100,000,000 | 1.56 | 641.01 M/s |
+| Capacity 4096 | 100,000,000 | 1.66 | 603.13 M/s |
 
 ## SPSC (Single Producer, Single Consumer)
 
 | Scenario | Iterations | ns/op (median) | Throughput |
 |----------|------------|----------------|------------|
-| Capacity 64 | 100,000,000 | 10.36 | 96.50 M/s |
-| Capacity 256 | 100,000,000 | 10.03 | 99.74 M/s |
-| Capacity 1024 | 100,000,000 | 12.47 | 80.22 M/s |
-| Capacity 4096 | 100,000,000 | 14.18 | 70.50 M/s |
+| Capacity 64 | 100,000,000 | 14.78 | 67.68 M/s |
+| Capacity 256 | 100,000,000 | 13.86 | 72.15 M/s |
+| Capacity 1024 | 100,000,000 | 13.70 | 73.00 M/s |
+| Capacity 4096 | 100,000,000 | 9.95 | 100.52 M/s |
 
 ## MPSC (Multiple Producers, Single Consumer)
 
 | Scenario | Iterations | ns/op (median) | Throughput |
 |----------|------------|----------------|------------|
-| 2P/1C (cap=512) | 100,000,000 | 11.17 | 89.55 M/s |
-| 4P/1C (cap=1024) | 100,000,000 | 12.68 | 78.89 M/s |
-| 8P/1C (cap=2048) | 100,000,000 | 9.00 | 100.00 M/s |
+| 2P/1C (cap=512) | 100,000,000 | 15.58 | 64.17 M/s |
+| 4P/1C (cap=1024) | 100,000,000 | 16.36 | 61.12 M/s |
+| 8P/1C (cap=2048) | 100,000,000 | 25.96 | 38.52 M/s |
 
 ## SPMC (Single Producer, Multiple Consumers)
 
 | Scenario | Iterations | ns/op (median) | Throughput |
 |----------|------------|----------------|------------|
-| 1P/2C (cap=512) | 100,000,000 | 18.56 | 53.88 M/s |
-| 1P/4C (cap=1024) | 100,000,000 | 24.40 | 40.98 M/s |
-| 1P/8C (cap=2048) | 100,000,000 | 30.98 | 32.28 M/s |
+| 1P/2C (cap=512) | 100,000,000 | 32.49 | 30.78 M/s |
+| 1P/4C (cap=1024) | 100,000,000 | 46.70 | 21.41 M/s |
+| 1P/8C (cap=2048) | 100,000,000 | 122.01 | 8.20 M/s |
 
 ## MPMC (Multiple Producers, Multiple Consumers)
 
 | Scenario | Iterations | ns/op (median) | Throughput |
 |----------|------------|----------------|------------|
-| 2P/2C (cap=512) | 100,000,000 | 17.31 | 57.76 M/s |
-| 4P/4C (cap=2048) | 100,000,000 | 25.23 | 39.63 M/s |
-| 8P/8C (cap=4096) | 100,000,000 | 47.93 | 20.86 M/s |
+| 2P/2C (cap=512) | 100,000,000 | 35.06 | 28.52 M/s |
+| 4P/4C (cap=2048) | 100,000,000 | 82.33 | 12.15 M/s |
+| 8P/8C (cap=4096) | 100,000,000 | 92.80 | 10.78 M/s |
 
 ## Performance Recommendations
 
