@@ -49,8 +49,8 @@ pub const Task = struct {
 
         const ctx = Context{ ._state = state };
 
-        // Prepend 'ctx' to the user's arguments
-        const thread_args = try std.tuple.concat(.{ctx}, args);
+        // Prepend 'ctx' to the user's arguments using comptime tuple concatenation
+        const thread_args = prependContext(ctx, args);
 
         const t = try std.Thread.spawn(.{}, function, thread_args);
 
@@ -59,6 +59,33 @@ pub const Task = struct {
             .state = state,
             .allocator = allocator,
         };
+    }
+
+    /// Helper function to prepend Context to args tuple at comptime
+    fn prependContext(ctx: Context, args: anytype) TuplePrepend(Context, @TypeOf(args)) {
+        const ArgsType = @TypeOf(args);
+        const args_fields = @typeInfo(ArgsType).@"struct".fields;
+        var result: TuplePrepend(Context, ArgsType) = undefined;
+        result[0] = ctx;
+        inline for (args_fields, 0..) |_, i| {
+            result[i + 1] = args[i];
+        }
+        return result;
+    }
+
+    /// Type function to create a tuple type with T prepended to ArgsType
+    fn TuplePrepend(comptime T: type, comptime ArgsType: type) type {
+        const args_fields = @typeInfo(ArgsType).@"struct".fields;
+        return std.meta.Tuple(&[_]type{T} ++ fieldTypes(args_fields));
+    }
+
+    /// Extract field types from struct fields
+    fn fieldTypes(comptime fields: []const std.builtin.Type.StructField) []const type {
+        var types: [fields.len]type = undefined;
+        for (fields, 0..) |field, i| {
+            types[i] = field.type;
+        }
+        return &types;
     }
 
     /// Signals the thread to cancel.

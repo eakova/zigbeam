@@ -2,25 +2,22 @@
 //! By importing this file, consumers (and internal tools like benchmarks)
 //! gain access to the entire surface area via a single namespace.
 
-const tagged_pointer = @import("tagged_pointer");
-const thread_local_cache = @import("thread_local_cache");
-const arc = @import("arc_core");
-const arc_pool = @import("arc_pool");
-const arc_cycle_detector = @import("arc_cycle_detector");
-const backoff = @import("backoff");
-const dvyukov_mpmc_queue = @import("dvyukov_mpmc");
-const sharded_dvyukov_mpmc_queue = @import("sharded_dvyukov_mpmc");
-const beam_deque = @import("beam_deque");
-const beam_deque_channel = @import("beam_deque_channel");
-const spsc_queue = @import("spsc_queue");
-const segmented_queue = @import("segmented_queue");
-const deque = @import("deque");
-const deque_pool = @import("deque_pool");
-const task = @import("task");
-const beam_task = @import("beam_task");
+const tagged_pointer = @import("beam-tagged-pointer");
+const thread_local_cache = @import("beam-thread-local-cache");
+const arc = @import("beam-arc");
+const arc_pool = @import("beam-arc-pool");
+const arc_cycle_detector = @import("beam-arc-cycle-detector");
+const backoff = @import("beam-backoff");
+const dvyukov_mpmc_queue = @import("beam-dvyukov-mpmc");
+const sharded_dvyukov_mpmc_queue = @import("beam-sharded-dvyukov-mpmc");
+const beam_deque = @import("beam-deque");
+const beam_deque_channel = @import("beam-deque-channel");
+const spsc_queue = @import("spsc-queue");
+const segmented_queue = @import("beam-segmented-queue");
+const beam_task = @import("beam-task");
 
 // Public entry under a single namespace. Consumers use:
-// const beam = @import("zig_beam");
+// const beam = @import("zigbeam");
 // const ArcU64 = beam.Libs.Arc(u64);
 pub const Libs = struct {
     pub const TaggedPointer = tagged_pointer.TaggedPointer;
@@ -40,9 +37,9 @@ pub const Libs = struct {
     pub const DVyukovMPMCQueue = dvyukov_mpmc_queue.DVyukovMPMCQueue;
     pub const ShardedDVyukovMPMCQueue = sharded_dvyukov_mpmc_queue.ShardedDVyukovMPMCQueue;
 
-    // Beam Deque - High-Performance Work-Stealing
-    pub const BeamDeque = beam_deque.BeamDeque;
-    pub const BeamDequeChannel = beam_deque_channel.BeamDequeChannel;
+    // Deque - High-Performance Work-Stealing
+    pub const Deque = beam_deque.Deque;
+    pub const DequeChannel = beam_deque_channel.DequeChannel;
 
     // Bounded SPSC Queue - Lock-Free Point-to-Point Communication
     pub const BoundedSPSCQueue = spsc_queue.BoundedSPSCQueue;
@@ -50,13 +47,6 @@ pub const Libs = struct {
     // Segmented Queue - Unbounded MPMC Queue with Dynamic Growth
     pub const SegmentedQueue = segmented_queue.SegmentedQueue;
 
-    // BeamTask - Cancellable OS-thread task abstraction
-    pub const BeamTask = beam_task.Task;
-};
-
-pub const Protos = struct {
-    // Work-Stealing Deque & Thread Pool (Legacy Prototypes)
-    pub const WorkStealingDeque = deque.WorkStealingDeque;
-    pub const WorkStealingPool = deque_pool.WorkStealingPool;
-    pub const Task = task.Task;
+    // Task - Cancellable OS-thread task abstraction
+    pub const Task = beam_task.Task;
 };

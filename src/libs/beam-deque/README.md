@@ -1,14 +1,14 @@
-# BeamDeque
+# Deque
 
 High-performance bounded work-stealing deque for building task schedulers and thread pools in Zig.
 
 ## Overview
 
-Work-stealing is a fundamental pattern in parallel computing where busy threads can "steal" work from idle threads. BeamDeque implements the Arora-Blumofe-Plaxton work-stealing algorithm with extreme performance optimizations.
+Work-stealing is a fundamental pattern in parallel computing where busy threads can "steal" work from idle threads. Deque is a bounded work-stealing deque based on the Chase-Lev algorithm (without dynamic resizing).
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    BeamDeque Architecture                       │
+│                      Deque Architecture                         │
 └─────────────────────────────────────────────────────────────────┘
 
     Owner Thread (Worker)          Thief Threads (Stealers)
@@ -38,10 +38,10 @@ Work-stealing is a fundamental pattern in parallel computing where busy threads 
 ## Usage
 
 ```zig
-const BeamDeque = @import("beam_deque").BeamDeque;
+const Deque = @import("beam_deque").Deque;
 
 // Initialize with power-of-two capacity
-const result = try BeamDeque(*Task).init(allocator, 1024);
+const result = try Deque(*Task).init(allocator, 1024);
 defer result.worker.deinit();
 
 // Owner thread - push and pop (LIFO)
@@ -62,7 +62,7 @@ if (stealer.steal()) |task| {
 ### Core API
 
 **Initialization:**
-- **`BeamDeque(T).init(allocator, capacity)`** - Create deque (capacity must be power-of-two)
+- **`Deque(T).init(allocator, capacity)`** - Create deque (capacity must be power-of-two)
 
 **Worker (Owner Thread):**
 - **`worker.push(item)`** - Push to bottom (~2-5ns, no CAS)
@@ -87,9 +87,9 @@ if (stealer.steal()) |task| {
 
 ### Design Principles
 
-- **SPMC pattern** - Single Producer, Multiple Consumers
+- **Work-stealing pattern** - One owner (push/pop), many thieves (steal)
 - **Bounded capacity** - Fixed-size ring buffer (returns `error.Full`)
-- **Arora-Blumofe-Plaxton** - Proven work-stealing algorithm
+- **Chase-Lev protocol** - Memory-efficient work-stealing without dynamic resizing
 - **Type safety** - Compile-time error for large types (use pointers instead)
 - **Zero allocation** - All operations are wait-free/lock-free
 
@@ -97,7 +97,7 @@ if (stealer.steal()) |task| {
 
 ```zig
 // Pattern 1: Thread pool task queue
-const TaskDeque = BeamDeque(*Task);
+const TaskDeque = Deque(*Task);
 var result = try TaskDeque.init(allocator, 256);
 
 // Worker thread processes own tasks (LIFO - good for cache)
@@ -147,15 +147,15 @@ fn thief_worker(stealer: Stealer, workers: []Stealer) void {
 }
 ```
 
-## BeamDequeChannel - MPMC Work-Stealing Channel
+## DequeChannel - MPMC Work-Stealing Channel
 
-**BeamDequeChannel** is a higher-level abstraction built on BeamDeque that provides a simple MPMC (Multiple Producer, Multiple Consumer) channel with automatic work-stealing and load balancing.
+**DequeChannel** is a higher-level abstraction built on Deque that provides a simple MPMC (Multiple Producer, Multiple Consumer) channel with automatic work-stealing and load balancing.
 
 ### Architecture
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│              BeamDequeChannel Architecture                 │
+│               DequeChannel Architecture                    │
 └────────────────────────────────────────────────────────────┘
 
 Worker 0          Worker 1          Worker 2          Worker N
@@ -167,7 +167,7 @@ Worker 0          Worker 1          Worker 2          Worker N
 │ [5] │        │ [3] │        │ [8] │        │ [2] │  Deques
 └──────┘        └──────┘        └──────┘        └──────┘  (Fast Path)
   │  ▲            │  ▲            │  ▲            │  ▲
-  │  └────────────┼──┼────────────┼──┘  Steal    │  │
+  │  └────────────┼──┼────────────┼──┘  Steal     │  │
   │               │  │            │  ◄────────────┘  │
   │               │  │            │                  │
   └───────────────┴──┴────────────┴──────────────────┘
@@ -194,10 +194,10 @@ recv() priority:
 ### Usage
 
 ```zig
-const BeamDequeChannel = @import("beam_deque_channel").BeamDequeChannel;
+const DequeChannel = @import("beam-deque-channel").DequeChannel;
 
 // Create channel with 8 workers, local capacity 256, global capacity 4096
-const Channel = BeamDequeChannel(*Task, 256, 4096);
+const Channel = DequeChannel(*Task, 256, 4096);
 var result = try Channel.init(allocator, 8);
 defer result.channel.deinit(&result.workers);
 
@@ -225,19 +225,19 @@ See [docs/BEAM_DEQUE_CHANNEL.md](docs/BEAM_DEQUE_CHANNEL.md) for detailed archit
 ## Build Commands
 
 ```bash
-# Run BeamDeque tests
+# Run Deque tests
 zig build test-beam-deque
 
-# Run BeamDeque benchmarks
+# Run Deque benchmarks
 zig build bench-beam-deque -Doptimize=ReleaseFast
 
-# Run BeamDequeChannel tests
+# Run DequeChannel tests
 zig build test-beam-deque-channel
 
-# Run BeamDequeChannel benchmarks
+# Run DequeChannel benchmarks
 zig build bench-beam-deque-channel -Doptimize=ReleaseFast
 
-# Run BeamDequeChannel V2 benchmarks (optimized usage patterns)
+# Run DequeChannel V2 benchmarks (optimized usage patterns)
 zig build bench-beam-deque-channel-v2 -Doptimize=ReleaseFast
 ```
 

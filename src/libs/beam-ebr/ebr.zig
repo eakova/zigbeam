@@ -2,7 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Atomic = std.atomic.Value;
 const Thread = std.Thread;
-const DVyukovMPMCQueue = @import("dvyukov_mpmc").DVyukovMPMCQueue;
+const DVyukovMPMCQueue = @import("beam-dvyukov-mpmc").DVyukovMPMCQueue;
 
 pub const CACHE_LINE: usize = std.atomic.cache_line;
 
