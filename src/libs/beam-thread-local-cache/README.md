@@ -10,7 +10,7 @@ Per‑thread lock‑free L1 reuse cache with an opt‑in global return callback.
 ## Quick Start
 ```zig
 const std = @import("std");
-const beam = @import("zig_beam");
+const beam = @import("zigbeam");
 
 const Item = *usize;
 fn on_evict(ctx: ?*anyopaque, it: Item) void {

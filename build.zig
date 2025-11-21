@@ -373,7 +373,7 @@ fn add_libs(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
     };
 
     // Individual import specs (each defined exactly once, then reused)
-    const wrapper_import = imp("zig_beam", wrapper);
+    const wrapper_import = imp("zigbeam", wrapper);
     const ebr_import = imp("beam-ebr", modules.segmented_queue_ebr);
     const beam_deque_import = imp("beam-deque", modules.beam_deque);
     const beam_deque_channel_import = imp("beam-deque-channel", modules.beam_deque_channel);
@@ -388,11 +388,11 @@ fn add_libs(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
 
     const bench_specs = [_]BenchSpec{
         // Benchmarks using wrapper module
-        .{ .name = "tlc-bench", .exe_name = "tlc_bench", .path = "src/libs/beam-thread-local-cache/benchmarks/_thread_local_cache_benchmarks.zig", .category = .bench_tlc, .imports = &[_]ImportSpec{wrapper_import, helpers_import} },
-        .{ .name = "arc-bench", .exe_name = "arc_bench", .path = "src/libs/beam-arc/benchmarks/_arc_benchmarks.zig", .category = .bench_arc, .imports = &[_]ImportSpec{wrapper_import, helpers_import} },
-        .{ .name = "arcpool-bench", .exe_name = "arcpool_bench", .path = "src/libs/beam-arc/arc-pool/benchmarks/_arc_pool_benchmarks.zig", .category = .bench_arc_pool, .imports = &[_]ImportSpec{wrapper_import, helpers_import} },
-        .{ .name = "dvyukov-bench", .exe_name = "_dvyukov_mpmc_queue_benchmarks", .path = "src/libs/beam-dvyukov-mpmc-queue/benchmarks/_dvyukov_mpmc_queue_benchmarks.zig", .category = .bench_dvyukov, .imports = &[_]ImportSpec{wrapper_import, helpers_import, dvyukov_mpmc_import} },
-        .{ .name = "sharded-dvyukov-bench", .exe_name = "_sharded_dvyukov_mpmc_queue_benchmarks", .path = "src/libs/beam-dvyukov-mpmc-queue/benchmarks/_sharded_dvyukov_mpmc_queue_benchmarks.zig", .category = .bench_dvyukov, .imports = &[_]ImportSpec{wrapper_import, helpers_import, dvyukov_mpmc_import, sharded_dvyukov_mpmc_import} },
+        .{ .name = "tlc-bench", .exe_name = "tlc_bench", .path = "src/libs/beam-thread-local-cache/benchmarks/_thread_local_cache_benchmarks.zig", .category = .bench_tlc, .imports = &[_]ImportSpec{ wrapper_import, helpers_import } },
+        .{ .name = "arc-bench", .exe_name = "arc_bench", .path = "src/libs/beam-arc/benchmarks/_arc_benchmarks.zig", .category = .bench_arc, .imports = &[_]ImportSpec{ wrapper_import, helpers_import } },
+        .{ .name = "arcpool-bench", .exe_name = "arcpool_bench", .path = "src/libs/beam-arc/arc-pool/benchmarks/_arc_pool_benchmarks.zig", .category = .bench_arc_pool, .imports = &[_]ImportSpec{ wrapper_import, helpers_import } },
+        .{ .name = "dvyukov-bench", .exe_name = "_dvyukov_mpmc_queue_benchmarks", .path = "src/libs/beam-dvyukov-mpmc-queue/benchmarks/_dvyukov_mpmc_queue_benchmarks.zig", .category = .bench_dvyukov, .imports = &[_]ImportSpec{ wrapper_import, helpers_import, dvyukov_mpmc_import } },
+        .{ .name = "sharded-dvyukov-bench", .exe_name = "_sharded_dvyukov_mpmc_queue_benchmarks", .path = "src/libs/beam-dvyukov-mpmc-queue/benchmarks/_sharded_dvyukov_mpmc_queue_benchmarks.zig", .category = .bench_dvyukov, .imports = &[_]ImportSpec{ wrapper_import, helpers_import, dvyukov_mpmc_import, sharded_dvyukov_mpmc_import } },
         .{ .name = "queue-util-bench", .exe_name = "test_queue_utilization", .path = "test_queue_utilization.zig", .category = .bench_queue_util, .imports = &[_]ImportSpec{wrapper_import} },
 
         // EBR-specific benchmarks
@@ -424,6 +424,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     // Public wrapper module must be defined at top-level build()
-    const wrapper = b.addModule("zig_beam", .{ .root_source_file = b.path("src/root.zig"), .target = target, .optimize = optimize });
+    const wrapper = b.addModule("zigbeam", .{ .root_source_file = b.path("src/root.zig"), .target = target, .optimize = optimize });
     add_libs(b, target, optimize, wrapper);
 }

@@ -11,7 +11,7 @@ High‑throughput reuse pool for Arc(T) heap allocations.
 ## Quick Start
 ```zig
 const std = @import("std");
-const beam = @import("zig_beam");
+const beam = @import("zigbeam");
 
 const Payload = [64]u8;
 const Pool = beam.Libs.ArcPool(Payload, false); // stats=false (default)

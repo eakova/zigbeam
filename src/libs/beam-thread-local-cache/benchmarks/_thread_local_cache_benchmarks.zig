@@ -3,7 +3,7 @@
 //! 1) warm up, 2) scale iterations, 3) record stats, 4) print + write docs.
 
 const std = @import("std");
-const beam = @import("zig_beam");
+const beam = @import("zigbeam");
 const cache_mod = beam.Libs;
 const cache_raw = beam.Libs;
 const helpers = @import("helpers");

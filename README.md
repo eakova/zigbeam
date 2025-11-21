@@ -1,8 +1,8 @@
-# Zig-Beam: Reusable building blocks for concurrent programming
+# ZigBeam: Reusable building blocks for concurrent programming
 
 ![Zig 0.15.2+](https://img.shields.io/badge/Zig-0.15.2+-blue)
 ![License](https://img.shields.io/badge/license-MIT_OR_Apache--2.0-blue.svg)
-![CI](https://github.com/eakova/zig-beam/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/eakova/zigbeam/actions/workflows/ci.yml/badge.svg)
 
 This repository hosts multiple Zig libraries under one roof. Each library can be used on its own or together via a common wrapper. The workspace is designed to be practical: every library ships with small samples, focused tests, and repeatable benchmarks.
 
@@ -153,9 +153,9 @@ You can consume libraries from this repo via Zig's package system (recommended) 
     .dependencies = .{
         .zigbeam = .{
             // Track a tag or commit tarball (recommended)
-            .url = "https://github.com/eakova/zig-beam/archive/refs/heads/main.tar.gz",
+            .url = "https://github.com/eakova/zigbeam/archive/refs/heads/main.tar.gz",
             // Compute and fill the content hash:
-            //   zig fetch https://github.com/eakova/zig-beam/archive/refs/heads/main.tar.gz --save
+            //   zig fetch https://github.com/eakova/zigbeam/archive/refs/heads/main.tar.gz --save
             .hash = "<fill-with-zig-fetch-output>",
         },
     },
@@ -173,11 +173,11 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Declare a dependency on zig-beam package
+    // Declare a dependency on zigbeam package
     const beam_dep = b.dependency("zigbeam", .{ .target = target, .optimize = optimize });
-    const beam = beam_dep.module("zig_beam");
+    const beam = beam_dep.module("zigbeam");
 
-    // Example: an executable that imports zig_beam
+    // Example: an executable that imports zigbeam
     const exe = b.addExecutable(.{
         .name = "your-app",
         .root_source_file = b.path("src/main.zig"),
@@ -291,7 +291,7 @@ Contributions are welcome in the form of issues, PRs, and feedback. Please inclu
 - A minimal snippet or path to a failing sample/test
 
 Good first steps:
-- File a bug or feature request: https://github.com/eakova/zig-beam/issues/new
+- File a bug or feature request: https://github.com/eakova/zigbeam/issues/new
 - Propose improvements to samples/bench docs or add a new small sample
 
 ## License

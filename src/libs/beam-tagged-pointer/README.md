@@ -9,7 +9,7 @@ Pack a small tag into a pointer’s low bits (alignment‑safe).
 
 ## Quick Start
 ```zig
-const beam = @import("zig_beam");
+const beam = @import("zigbeam");
 const TaggedPointer = @import("tagged_pointer").TaggedPointer; // internal import
 
 const P = struct { x: i32 };

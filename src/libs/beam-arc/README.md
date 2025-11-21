@@ -14,7 +14,7 @@ Fast atomic reference counting with a reuse pool and optional cycle detection.
 Import via the wrapper module and use the `Libs` namespace:
 
 ```zig
-const beam = @import("zig_beam");
+const beam = @import("zigbeam");
 const ArcU32 = beam.Libs.Arc(u32);
 const Pool = beam.Libs.ArcPool([64]u8, false); // stats=false (default)
 

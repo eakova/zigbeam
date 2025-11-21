@@ -3,7 +3,7 @@
 //! - `zig build -Doptimize=ReleaseFast bench-arc-pool`
 
 const std = @import("std");
-const beam = @import("zig_beam");
+const beam = @import("zigbeam");
 
 const Thread = std.Thread;
 const Timer = std.time.Timer;

@@ -10,7 +10,7 @@ Optional diagnostic for finding strongly‑reachable cycles of Arc(T).
 ## Quick Start
 ```zig
 const std = @import("std");
-const beam = @import("zig_beam");
+const beam = @import("zigbeam");
 
 const Arc = beam.Libs.Arc(u32);
 const Detector = beam.Libs.ArcCycleDetector(u32);

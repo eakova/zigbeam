@@ -32,9 +32,9 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
-        .zig_beam = .{
-            .url = "https://github.com/eakova/zig-beam/archive/refs/tags/v0.1.0-rc2.tar.gz",
-            .hash = "zig_beam-0.0.1--2bxTZUWBAC5XNKj12oxIG2lJQTmYhOnAqPmyuVFoOnK",
+        .zigbeam = .{
+            .url = "https://github.com/eakova/zig-beam/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "zigbeam-0.0.1-eZKHgrzQEADZ9kuKkmLVjSFA24V5gl3AEEcezMhDnXfW",
         },
     },
     .paths = .{
