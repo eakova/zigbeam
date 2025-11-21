@@ -58,7 +58,7 @@ pub fn build(b: *std.Build) void {
     // If neither case applies to you, feel free to delete the declaration you
     // don't need and to put everything under a single module.
     // Resolve zig-beam wrapper module from dependency
-    const beam_dep = b.dependency("zig_beam", .{ .target = target, .optimize = optimize });
+    const beam_dep = b.dependency("zigbeam", .{ .target = target, .optimize = optimize });
     const beam_mod = beam_dep.module("zig_beam");
 
     const exe = b.addExecutable(.{
