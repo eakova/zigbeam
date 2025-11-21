@@ -120,8 +120,8 @@ pub fn sampleAdvancedPoolAndDetector(allocator: std.mem.Allocator) !usize {
     node_a.asPtr().data.next = node_b.clone();
     node_b.asPtr().data.next = node_a.clone();
 
-    try detector.track(node_a.clone());
-    try detector.track(node_b.clone());
+    try detector.track(&node_a);
+    try detector.track(&node_b);
 
     var weak_a = node_a.downgrade().?;
     var weak_b = node_b.downgrade().?;
@@ -329,7 +329,7 @@ pub fn sampleAtomicSwapBuffer(allocator: std.mem.Allocator) !bool {
     // Reader thread: atomically loads buffer
     const reader_fn = struct {
         fn run(c: Context) void {
-            std.time.sleep(1_000_000); // 1ms - let writer start
+            std.Thread.sleep(1_000_000); // 1ms - let writer start
 
             if (ArcBuffer.atomicLoad(c.buffer, .acquire)) |loaded_buffer| {
                 defer loaded_buffer.release();
@@ -380,8 +380,6 @@ test "sample (atomic): atomicSwap for buffer replacement" {
 /// 2. Each thread uses CAS in a retry loop
 /// 3. Only successful CAS operations increment the counter
 pub fn sampleAtomicCompareSwapCounter(allocator: std.mem.Allocator) !u32 {
-    const ArcU32 = ArcModule.Arc(u32);
-
     var shared_counter = try ArcU32.init(allocator, 0);
     defer shared_counter.release();
 

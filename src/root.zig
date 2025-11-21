@@ -15,6 +15,7 @@ const beam_deque_channel = @import("beam-deque-channel");
 const spsc_queue = @import("spsc-queue");
 const segmented_queue = @import("beam-segmented-queue");
 const beam_task = @import("beam-task");
+const cache_padded = @import("beam-cache-padded");
 
 // Public entry under a single namespace. Consumers use:
 // const beam = @import("zigbeam");
@@ -49,4 +50,7 @@ pub const Libs = struct {
 
     // Task - Cancellable OS-thread task abstraction
     pub const Task = beam_task.Task;
+
+    // CachePadded - Cache-line aware padding helpers
+    pub const CachePadded = cache_padded.CachePadded;
 };

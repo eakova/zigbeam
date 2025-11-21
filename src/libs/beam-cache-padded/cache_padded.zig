@@ -188,7 +188,7 @@ pub const CachePadded = struct {
         comptime {
             const info = @typeInfo(T);
             // Restrict to integer types so fetchAdd/fetchSub are well-defined.
-            if (info != .Int and info != .ComptimeInt) {
+            if (info != .int and info != .comptime_int) {
                 @compileError("CachePadded.Atomic(T) only supports integer types");
             }
         }
