@@ -20,6 +20,15 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate tag exists
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if ! git rev-parse --verify --quiet "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag '${TAG}' not found. Please create it or fetch tags before running this workflow."
+            exit 1
+          fi
+
       - name: Install Zig
         uses: goto-bus-stop/setup-zig@v2
         with:
@@ -67,4 +76,10 @@ jobs:
           body_path: ${{ steps.body.outputs.path }}
           files: |
             docs/README.md
-            src/libs/beam-*/README.md
+            src/libs/beam-arc/README.md
+            src/libs/beam-deque/README.md
+            src/libs/beam-dvyukov-mpmc-queue/README.md
+            src/libs/beam-ebr/README.md
+            src/libs/beam-tagged-pointer/README.md
+            src/libs/beam-task/README.md
+            src/libs/beam-thread-local-cache/README.md
