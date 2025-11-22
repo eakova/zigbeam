@@ -75,11 +75,11 @@ jobs:
           tag_name: ${{ inputs.tag }}
           body_path: ${{ steps.body.outputs.path }}
           files: |
-            docs/README.md
-            src/libs/beam-arc/README.md
-            src/libs/beam-deque/README.md
-            src/libs/beam-dvyukov-mpmc-queue/README.md
-            src/libs/beam-ebr/README.md
-            src/libs/beam-tagged-pointer/README.md
-            src/libs/beam-task/README.md
-            src/libs/beam-thread-local-cache/README.md
+            docs/README.md#docs-README.md
+            src/libs/beam-arc/README.md#beam-arc-README.md
+            src/libs/beam-deque/README.md#beam-deque-README.md
+            src/libs/beam-dvyukov-mpmc-queue/README.md#beam-dvyukov-mpmc-queue-README.md
+            src/libs/beam-ebr/README.md#beam-ebr-README.md
+            src/libs/beam-tagged-pointer/README.md#beam-tagged-pointer-README.md
+            src/libs/beam-task/README.md#beam-task-README.md
+            src/libs/beam-thread-local-cache/README.md#beam-thread-local-cache-README.md
