@@ -20,8 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        optimize: [Debug, ReleaseFast]
-    if: github.event_name != 'pull_request' || matrix.optimize == 'Debug'
+        optimize: ${{ github.event_name == 'pull_request' && fromJSON('["Debug"]') || fromJSON('["Debug","ReleaseFast"]') }}
     runs-on: ${{ matrix.os }}
     env:
       ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}/.zig-global-cache
