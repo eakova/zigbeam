@@ -61,7 +61,8 @@ pub fn Arc(comptime T: type) type {
 
         // --- Public Constants and Configuration ---
         const SVO_SIZE_THRESHOLD = @sizeOf(usize);
-        const storage_align = if (use_svo) @alignOf(T) else @alignOf(usize);
+        // Storage must be at least usize-aligned for atomic operations on ptr_with_tag
+        const storage_align = @max(@alignOf(T), @alignOf(usize));
         pub const use_svo = @sizeOf(T) <= SVO_SIZE_THRESHOLD and isPlainData(T);
         pub const TAG_POINTER: u1 = 0;
         pub const TAG_INLINE: u1 = 1;
@@ -267,6 +268,15 @@ pub fn Arc(comptime T: type) type {
         /// Increase the strong count and return another Arc to the same value.
         /// For inline arcs, this is a cheap copy.
         pub inline fn clone(self: *const Self) Self {
+            if (comptime use_svo) {
+                // For SVO types, atomically load the storage to avoid torn reads
+                // when another thread is doing atomicCompareSwap concurrently
+                const storage_ptr: *const usize = @ptrCast(&self.storage);
+                const raw_value = @atomicLoad(usize, storage_ptr, .acquire);
+                var inline_bytes: [SVO_SIZE_THRESHOLD]u8 = undefined;
+                @memcpy(&inline_bytes, std.mem.asBytes(&raw_value));
+                return Self{ .storage = .{ .inline_data = inline_bytes } };
+            }
             if (self.isInline()) return self.*;
             const inner = self.asPtr();
             const prev = inner.counters.strong_count.fetchAdd(1, .monotonic);
@@ -448,13 +458,21 @@ pub fn Arc(comptime T: type) type {
         /// }
         /// ```
         pub fn atomicLoad(arc_ptr: *const Self, comptime ordering: std.builtin.AtomicOrder) ?Self {
+            // Use atomic load on storage for both SVO and non-SVO types.
+            // We use @ptrCast to treat the storage as a usize for atomic operations,
+            // bypassing union field tracking while maintaining memory safety.
+            const storage_ptr: *const usize = @ptrCast(&arc_ptr.storage);
+            const raw_value = @atomicLoad(usize, storage_ptr, ordering);
+
             if (comptime use_svo) {
-                // SVO types are small enough to copy directly - no refcounting needed
-                return arc_ptr.*;
+                // SVO types: reconstruct with inline_data as the active union field
+                // Copy the raw bytes into inline_data to set the correct union variant
+                var inline_bytes: [SVO_SIZE_THRESHOLD]u8 = undefined;
+                @memcpy(&inline_bytes, std.mem.asBytes(&raw_value));
+                return Self{ .storage = .{ .inline_data = inline_bytes } };
             }
 
-            // Atomically load the tagged pointer value
-            const tagged_ptr = @atomicLoad(usize, &arc_ptr.storage.ptr_with_tag, ordering);
+            const tagged_ptr = raw_value;
 
             // Construct temporary Arc from the loaded pointer
             const arc_temp = Self{ .storage = .{ .ptr_with_tag = tagged_ptr } };
@@ -500,13 +518,16 @@ pub fn Arc(comptime T: type) type {
         /// Arc(Buffer).atomicStore(&shared_arc, new_arc, .release);
         /// ```
         pub fn atomicStore(arc_ptr: *Self, new_value: Self, comptime ordering: std.builtin.AtomicOrder) void {
+            // Use atomic exchange on storage for both SVO and non-SVO types.
+            // We use @ptrCast to treat the storage as a usize for atomic operations.
+            const storage_ptr: *usize = @ptrCast(&arc_ptr.storage);
+            const new_storage_ptr: *const usize = @ptrCast(&new_value.storage);
+            const old_tagged = @atomicRmw(usize, storage_ptr, .Xchg, new_storage_ptr.*, ordering);
+
             if (comptime use_svo) {
-                arc_ptr.* = new_value;
+                // SVO types don't have refcounts, nothing to release
                 return;
             }
-
-            // Use atomicRmw with .Xchg to get the old value (@atomicStore returns void!)
-            const old_tagged = @atomicRmw(usize, &arc_ptr.storage.ptr_with_tag, .Xchg, new_value.storage.ptr_with_tag, ordering);
 
             // Release the old Arc (decrement its refcount)
             const old_arc = Self{ .storage = .{ .ptr_with_tag = old_tagged } };
@@ -527,17 +548,21 @@ pub fn Arc(comptime T: type) type {
         /// defer old_arc.release(); // Don't forget to release the old Arc!
         /// ```
         pub fn atomicSwap(arc_ptr: *Self, new_value: Self, comptime ordering: std.builtin.AtomicOrder) Self {
+            // Use atomic exchange on storage for both SVO and non-SVO types.
+            // We use @ptrCast to treat the storage as a usize for atomic operations.
+            const storage_ptr: *usize = @ptrCast(&arc_ptr.storage);
+            const new_storage_ptr: *const usize = @ptrCast(&new_value.storage);
+            const old_raw = @atomicRmw(usize, storage_ptr, .Xchg, new_storage_ptr.*, ordering);
+
             if (comptime use_svo) {
-                const old = arc_ptr.*;
-                arc_ptr.* = new_value;
-                return old;
+                // SVO types: reconstruct with inline_data as the active union field
+                var inline_bytes: [SVO_SIZE_THRESHOLD]u8 = undefined;
+                @memcpy(&inline_bytes, std.mem.asBytes(&old_raw));
+                return Self{ .storage = .{ .inline_data = inline_bytes } };
             }
 
-            // Atomically swap the tagged pointers
-            const old_tagged = @atomicRmw(usize, &arc_ptr.storage.ptr_with_tag, .Xchg, new_value.storage.ptr_with_tag, ordering);
-
             // Return the old Arc (caller is responsible for releasing it)
-            return Self{ .storage = .{ .ptr_with_tag = old_tagged } };
+            return Self{ .storage = .{ .ptr_with_tag = old_raw } };
         }
 
         /// Atomically compare-and-swap an Arc.
@@ -571,24 +596,28 @@ pub fn Arc(comptime T: type) type {
             comptime success_order: std.builtin.AtomicOrder,
             comptime failure_order: std.builtin.AtomicOrder,
         ) Self {
-            if (comptime use_svo) {
-                const current = arc_ptr.*;
-                if (std.mem.eql(u8, std.mem.asBytes(&current), std.mem.asBytes(&expected))) {
-                    arc_ptr.* = new_value;
-                }
-                return current;
-            }
-
-            const prev_tagged = @cmpxchgStrong(
+            // Use atomic CAS on storage for both SVO and non-SVO types.
+            // We use @ptrCast to treat the storage as a usize for atomic operations.
+            const storage_ptr: *usize = @ptrCast(&arc_ptr.storage);
+            const expected_ptr: *const usize = @ptrCast(&expected.storage);
+            const new_ptr: *const usize = @ptrCast(&new_value.storage);
+            const prev_raw = @cmpxchgStrong(
                 usize,
-                &arc_ptr.storage.ptr_with_tag,
-                expected.storage.ptr_with_tag,
-                new_value.storage.ptr_with_tag,
+                storage_ptr,
+                expected_ptr.*,
+                new_ptr.*,
                 success_order,
                 failure_order,
-            ) orelse expected.storage.ptr_with_tag; // If CAS succeeded, prev = expected
+            ) orelse expected_ptr.*; // If CAS succeeded, prev = expected
 
-            return Self{ .storage = .{ .ptr_with_tag = prev_tagged } };
+            if (comptime use_svo) {
+                // SVO types: reconstruct with inline_data as the active union field
+                var inline_bytes: [SVO_SIZE_THRESHOLD]u8 = undefined;
+                @memcpy(&inline_bytes, std.mem.asBytes(&prev_raw));
+                return Self{ .storage = .{ .inline_data = inline_bytes } };
+            }
+
+            return Self{ .storage = .{ .ptr_with_tag = prev_raw } };
         }
 
         /// Compare two Arcs for pointer equality (do they point to the same Inner?).
@@ -606,8 +635,10 @@ pub fn Arc(comptime T: type) type {
         /// ```
         pub fn ptrEqual(a: Self, b: Self) bool {
             if (comptime use_svo) {
-                // SVO arcs are always distinct
-                return false;
+                // For SVO types, compare the actual inline data values
+                const a_ptr: *const usize = @ptrCast(&a.storage);
+                const b_ptr: *const usize = @ptrCast(&b.storage);
+                return a_ptr.* == b_ptr.*;
             }
             return a.storage.ptr_with_tag == b.storage.ptr_with_tag;
         }
