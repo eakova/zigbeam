@@ -175,10 +175,19 @@ test "DequeChannel: 8P/8C stress test (1M items)" {
                     }
                 }
 
-                // Final drain - get remaining items after done is set
-                while (worker.recv()) |value| {
-                    count += 1;
-                    _ = items[@intCast(value)].swap(true, .monotonic);
+                // Final drain - keep trying to recv (with work-stealing) until
+                // no items found after multiple attempts. Items may still be
+                // in other workers' queues waiting to be stolen.
+                var empty_attempts: usize = 0;
+                while (empty_attempts < 100) {
+                    if (worker.recv()) |value| {
+                        count += 1;
+                        _ = items[@intCast(value)].swap(true, .monotonic);
+                        empty_attempts = 0; // Reset on successful recv
+                    } else {
+                        empty_attempts += 1;
+                        Thread.yield() catch {};
+                    }
                 }
 
                 _ = counter.fetchAdd(count, .monotonic);
@@ -249,9 +258,17 @@ test "DequeChannel: 1P/8C load balancing test" {
                     }
                 }
 
-                // Final drain
-                while (worker.recv()) |_| {
-                    count += 1;
+                // Final drain - keep trying with work-stealing until no items
+                // found after multiple attempts
+                var empty_attempts: usize = 0;
+                while (empty_attempts < 100) {
+                    if (worker.recv()) |_| {
+                        count += 1;
+                        empty_attempts = 0;
+                    } else {
+                        empty_attempts += 1;
+                        Thread.yield() catch {};
+                    }
                 }
 
                 counter.store(count, .monotonic);

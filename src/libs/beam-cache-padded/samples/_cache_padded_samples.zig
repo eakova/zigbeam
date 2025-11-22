@@ -50,8 +50,8 @@ pub fn main() !void {
     var atomic_counter = CP.AtomicAuto(i64).init(0);
 
     // Simulate a few increments (single-thread demo)
-    _ = atomic_counter.fetchAdd(1, .relaxed);
-    _ = atomic_counter.fetchAdd(10, .relaxed);
+    _ = atomic_counter.fetchAdd(1, .monotonic);
+    _ = atomic_counter.fetchAdd(10, .monotonic);
     const current = atomic_counter.load(.acquire);
 
     try stdout.print("AtomicAuto counter after two increments: {d}\n", .{current});

@@ -268,6 +268,15 @@ pub fn Arc(comptime T: type) type {
         /// Increase the strong count and return another Arc to the same value.
         /// For inline arcs, this is a cheap copy.
         pub inline fn clone(self: *const Self) Self {
+            if (comptime use_svo) {
+                // For SVO types, atomically load the storage to avoid torn reads
+                // when another thread is doing atomicCompareSwap concurrently
+                const storage_ptr: *const usize = @ptrCast(&self.storage);
+                const raw_value = @atomicLoad(usize, storage_ptr, .acquire);
+                var inline_bytes: [SVO_SIZE_THRESHOLD]u8 = undefined;
+                @memcpy(&inline_bytes, std.mem.asBytes(&raw_value));
+                return Self{ .storage = .{ .inline_data = inline_bytes } };
+            }
             if (self.isInline()) return self.*;
             const inner = self.asPtr();
             const prev = inner.counters.strong_count.fetchAdd(1, .monotonic);
