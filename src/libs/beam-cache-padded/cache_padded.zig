@@ -208,19 +208,19 @@ pub const CachePadded = struct {
                 return .{ .atom = a };
             }
 
-            pub fn load(self: *const @This(), order: std.atomic.Order) T {
+            pub fn load(self: *const @This(), order: std.builtin.AtomicOrder) T {
                 return self.atom.load(order);
             }
 
-            pub fn store(self: *@This(), v: T, order: std.atomic.Order) void {
+            pub fn store(self: *@This(), v: T, order: std.builtin.AtomicOrder) void {
                 self.atom.store(v, order);
             }
 
-            pub fn fetchAdd(self: *@This(), v: T, order: std.atomic.Order) T {
+            pub fn fetchAdd(self: *@This(), v: T, order: std.builtin.AtomicOrder) T {
                 return self.atom.fetchAdd(v, order);
             }
 
-            pub fn fetchSub(self: *@This(), v: T, order: std.atomic.Order) T {
+            pub fn fetchSub(self: *@This(), v: T, order: std.builtin.AtomicOrder) T {
                 return self.atom.fetchSub(v, order);
             }
         };
