@@ -34,8 +34,8 @@ test "AtomicAuto behaves as a cache-padded atomic counter" {
     try std.testing.expect(@sizeOf(AtomicI64) >= line);
 
     var counter = AtomicI64.init(0);
-    _ = counter.fetchAdd(1, .relaxed);
-    _ = counter.fetchAdd(10, .relaxed);
+    _ = counter.fetchAdd(1, .monotonic);
+    _ = counter.fetchAdd(10, .monotonic);
     const cur = counter.load(.acquire);
     try std.testing.expectEqual(@as(i64, 11), cur);
 
