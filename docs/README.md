@@ -137,7 +137,7 @@ Add to your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .zigbeam = .{
-        .url = "https://github.com/eakova/zig-beam/archive/refs/heads/main.tar.gz",
+        .url = "https://github.com/eakova/zigbeam/archive/refs/heads/main.tar.gz",
         .hash = "<run: zig fetch <url> --save>",
     },
 },

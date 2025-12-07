@@ -219,7 +219,7 @@ zig build samples-ebr
 
 - **Zig version**: 0.13.0 or later
 - **Platform**: Any platform supported by Zig's standard library
-- **Dependencies**: Part of [zig-beam](https://github.com/eakova/zig-beam)
+- **Dependencies**: Part of [zigbeam](https://github.com/eakova/zigbeam)
 - **Constraints**: Types using `deferDestroy` must have an `allocator` field
 
 ## License

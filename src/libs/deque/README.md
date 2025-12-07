@@ -245,7 +245,7 @@ zig build bench-beam-deque-channel-v2 -Doptimize=ReleaseFast
 
 - **Zig version**: 0.13.0 or later
 - **Platform**: Any platform supported by Zig's standard library
-- **Dependencies**: Part of [zig-beam](https://github.com/eakova/zig-beam)
+- **Dependencies**: Part of [zigbeam](https://github.com/eakova/zigbeam)
 - **Constraints**: Capacity must be power-of-two, types > 64 bytes must be pointers
 
 ## License
