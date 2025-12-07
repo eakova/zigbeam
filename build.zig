@@ -202,7 +202,7 @@ fn createModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
     const deque = mb.create("src/libs/deque/deque.zig");
     const deque_channel = mb.create("src/libs/deque/deque_channel.zig");
     const task = mb.create("src/libs/task/task.zig");
-    const loom = mb.create("src/libs/loom/src/root.zig");
+    const loom = mb.create("src/loom/loom.zig");
     const spsc_queue = mb.create("src/libs/spsc-queue/spsc_queue.zig");
     const cache_padded = mb.create("src/libs/cache-padded/cache_padded.zig");
     const lock_free_segmented_list = mb.create("src/libs/segmented-queue/lock_free_segmented_list.zig");
@@ -434,14 +434,14 @@ fn add_libs(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
         .{ .name = "cache-padded-samples", .path = "src/libs/cache-padded/samples/_cache_padded_samples.zig", .category = .cache_padded },
         .{ .name = "task-tests", .path = "src/libs/task/tests/_task_tests.zig", .category = .task },
         // Loom tests
-        .{ .name = "loom-thread-pool", .path = "src/libs/loom/tests/unit/thread_pool_test.zig", .category = .loom_unit },
-        .{ .name = "loom-join", .path = "src/libs/loom/tests/unit/join_test.zig", .category = .loom_unit },
-        .{ .name = "loom-scope", .path = "src/libs/loom/tests/unit/scope_test.zig", .category = .loom_unit },
-        .{ .name = "loom-parallel-iter", .path = "src/libs/loom/tests/unit/parallel_iter_test.zig", .category = .loom_unit },
-        .{ .name = "loom-worker-id", .path = "src/libs/loom/tests/unit/worker_id_test.zig", .category = .loom_unit },
-        .{ .name = "loom-iterator-parity", .path = "src/libs/loom/tests/unit/iterator_parity_test.zig", .category = .loom_unit },
-        .{ .name = "loom-custom-pool", .path = "src/libs/loom/tests/integration/custom_pool_test.zig", .category = .loom_integration },
-        .{ .name = "loom-context-api", .path = "src/libs/loom/tests/integration/context_api_test.zig", .category = .loom_integration },
+        .{ .name = "loom-thread-pool", .path = "src/loom/tests/unit/thread_pool_test.zig", .category = .loom_unit },
+        .{ .name = "loom-join", .path = "src/loom/tests/unit/join_test.zig", .category = .loom_unit },
+        .{ .name = "loom-scope", .path = "src/loom/tests/unit/scope_test.zig", .category = .loom_unit },
+        .{ .name = "loom-parallel-iter", .path = "src/loom/tests/unit/parallel_iter_test.zig", .category = .loom_unit },
+        .{ .name = "loom-worker-id", .path = "src/loom/tests/unit/worker_id_test.zig", .category = .loom_unit },
+        .{ .name = "loom-iterator-parity", .path = "src/loom/tests/unit/iterator_parity_test.zig", .category = .loom_unit },
+        .{ .name = "loom-custom-pool", .path = "src/loom/tests/integration/custom_pool_test.zig", .category = .loom_integration },
+        .{ .name = "loom-context-api", .path = "src/loom/tests/integration/context_api_test.zig", .category = .loom_integration },
     };
 
     // Individual import specs (each defined exactly once, then reused)
@@ -459,7 +459,7 @@ fn add_libs(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
 
     // Loom bench reporter module
     const loom_bench_reporter = b.createModule(.{
-        .root_source_file = b.path("src/libs/loom/bench/bench_reporter.zig"),
+        .root_source_file = b.path("src/loom/bench/bench_reporter.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -497,18 +497,18 @@ fn add_libs(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.built
         .{ .name = "segmented-queue-guard-api-bench", .exe_name = "_guard_api_comparison_bench", .path = "src/libs/segmented-queue/benchmarks/_guard_api_comparison_bench.zig", .category = .bench_segmented_queue_guard_api, .imports = &[_]ImportSpec{ segmented_queue_import, dvyukov_mpmc_import, backoff_import, ebr_import } },
 
         // Loom benchmarks
-        .{ .name = "loom-throughput-bench", .exe_name = "loom_throughput_bench", .path = "src/libs/loom/bench/throughput_bench.zig", .category = .bench_loom, .imports = &[_]ImportSpec{ loom_import, loom_bench_reporter_import } },
-        .{ .name = "loom-join-bench", .exe_name = "loom_join_bench", .path = "src/libs/loom/bench/join_bench.zig", .category = .bench_loom, .imports = &[_]ImportSpec{ loom_import, loom_bench_reporter_import } },
-        .{ .name = "loom-parallel-iter-bench", .exe_name = "loom_parallel_iter_bench", .path = "src/libs/loom/bench/parallel_iter_bench.zig", .category = .bench_loom, .imports = &[_]ImportSpec{ loom_import, loom_bench_reporter_import } },
-        .{ .name = "loom-api-bench", .exe_name = "loom_api_bench", .path = "src/libs/loom/bench/api_bench.zig", .category = .bench_loom, .imports = &[_]ImportSpec{ loom_import, loom_bench_reporter_import } },
-        .{ .name = "loom-work-stealing-bench", .exe_name = "loom_work_stealing_bench", .path = "src/libs/loom/bench/work_stealing_bench.zig", .category = .bench_loom, .imports = &[_]ImportSpec{ loom_import, loom_bench_reporter_import } },
+        .{ .name = "loom-throughput-bench", .exe_name = "loom_throughput_bench", .path = "src/loom/bench/throughput_bench.zig", .category = .bench_loom, .imports = &[_]ImportSpec{ loom_import, loom_bench_reporter_import } },
+        .{ .name = "loom-join-bench", .exe_name = "loom_join_bench", .path = "src/loom/bench/join_bench.zig", .category = .bench_loom, .imports = &[_]ImportSpec{ loom_import, loom_bench_reporter_import } },
+        .{ .name = "loom-parallel-iter-bench", .exe_name = "loom_parallel_iter_bench", .path = "src/loom/bench/parallel_iter_bench.zig", .category = .bench_loom, .imports = &[_]ImportSpec{ loom_import, loom_bench_reporter_import } },
+        .{ .name = "loom-api-bench", .exe_name = "loom_api_bench", .path = "src/loom/bench/api_bench.zig", .category = .bench_loom, .imports = &[_]ImportSpec{ loom_import, loom_bench_reporter_import } },
+        .{ .name = "loom-work-stealing-bench", .exe_name = "loom_work_stealing_bench", .path = "src/loom/bench/work_stealing_bench.zig", .category = .bench_loom, .imports = &[_]ImportSpec{ loom_import, loom_bench_reporter_import } },
 
         // Loom samples
-        .{ .name = "loom-sample-image-transform", .exe_name = "loom_image_transform", .path = "src/libs/loom/samples/image_transform.zig", .category = .samples_loom, .imports = &[_]ImportSpec{loom_import} },
-        .{ .name = "loom-sample-csv-transform-mmap", .exe_name = "loom_csv_transform_mmap", .path = "src/libs/loom/samples/csv_transform_mmap_with_loom.zig", .category = .samples_loom, .imports = &[_]ImportSpec{loom_import} },
-        .{ .name = "loom-sample-csv-transform-inmem", .exe_name = "loom_csv_transform_inmem", .path = "src/libs/loom/samples/csv_transform_in_mem_with_loom.zig", .category = .samples_loom, .imports = &[_]ImportSpec{loom_import} },
-        .{ .name = "loom-sample-api-showcase", .exe_name = "loom_api_showcase", .path = "src/libs/loom/samples/loom_api_showcase.zig", .category = .samples_loom, .imports = &[_]ImportSpec{loom_import} },
-        .{ .name = "loom-sample-context-api-bench", .exe_name = "context_api_bench", .path = "src/libs/loom/samples/context_api_bench.zig", .category = .samples_loom, .imports = &[_]ImportSpec{loom_import} },
+        .{ .name = "loom-sample-image-transform", .exe_name = "loom_image_transform", .path = "src/loom/samples/image_transform.zig", .category = .samples_loom, .imports = &[_]ImportSpec{loom_import} },
+        .{ .name = "loom-sample-csv-transform-mmap", .exe_name = "loom_csv_transform_mmap", .path = "src/loom/samples/csv_transform_mmap_with_loom.zig", .category = .samples_loom, .imports = &[_]ImportSpec{loom_import} },
+        .{ .name = "loom-sample-csv-transform-inmem", .exe_name = "loom_csv_transform_inmem", .path = "src/loom/samples/csv_transform_in_mem_with_loom.zig", .category = .samples_loom, .imports = &[_]ImportSpec{loom_import} },
+        .{ .name = "loom-sample-api-showcase", .exe_name = "loom_api_showcase", .path = "src/loom/samples/loom_api_showcase.zig", .category = .samples_loom, .imports = &[_]ImportSpec{loom_import} },
+        .{ .name = "loom-sample-context-api-bench", .exe_name = "context_api_bench", .path = "src/loom/samples/context_api_bench.zig", .category = .samples_loom, .imports = &[_]ImportSpec{loom_import} },
     };
 
     wireTests(b, target, optimize, steps, modules, &test_specs);

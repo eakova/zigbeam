@@ -2,6 +2,7 @@
 //! By importing this file, consumers (and internal tools like benchmarks)
 //! gain access to the entire surface area via a single namespace.
 
+const loom = @import("loom");
 const tagged_pointer = @import("tagged-pointer");
 const thread_local_cache = @import("thread-local-cache");
 const arc = @import("arc");
@@ -17,6 +18,10 @@ const segmented_queue = @import("segmented-queue");
 const task = @import("task");
 const cache_padded = @import("cache-padded");
 const ebr = @import("ebr");
+
+// Loom - High-Performance Work-Stealing Thread Pool with Parallel Iterators
+// Framework that orchestrates primitives (not a primitive itself)
+pub const Loom = loom;
 
 // Public entry under a single namespace. Consumers use:
 // const beam = @import("zigbeam");
