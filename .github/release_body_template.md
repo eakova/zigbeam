@@ -8,7 +8,7 @@ This is a draft release for tag {{TAG}}.
 
 ## Quick Start (pin by tag)
 ```bash
-zig fetch --save https://github.com/eakova/zig-beam/archive/refs/tags/{{TAG}}.tar.gz
+zig fetch --save https://github.com/eakova/zigbeam/archive/refs/tags/{{TAG}}.tar.gz
 ```
 
 In build.zig:

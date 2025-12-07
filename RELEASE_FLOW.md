@@ -36,7 +36,7 @@ Pushing a `v*` tag triggers the GitHub Action at `.github/workflows/release-draf
 
 ### How Consumers Pin a Version
 ```bash
-zig fetch --save https://github.com/eakova/zig-beam/archive/refs/tags/v0.3.0.tar.gz
+zig fetch --save https://github.com/eakova/zigbeam/archive/refs/tags/v0.3.0.tar.gz
 ```
 
 In `build.zig`:
