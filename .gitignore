@@ -40,3 +40,6 @@ zig-cache/
 
 # Refs
 refs/
+
+# Large generated sample data files (GitHub 100MB limit)
+**/sample*.csv

@@ -1,4 +1,49 @@
 const std = @import("std");
+const builtin = @import("builtin");
+
+// ============================================================================
+// Cache-line alignment utilities
+// ============================================================================
+
+/// Cache line size for the target architecture.
+/// Used to prevent false sharing between thread-local structures.
+///
+/// - x86_64: 64 bytes
+/// - aarch64 (Apple Silicon): 128 bytes
+/// - Default: 64 bytes
+pub const cache_line: usize = switch (builtin.cpu.arch) {
+    .aarch64, .aarch64_be => 128,
+    else => 64,
+};
+
+/// Padding type to fill remaining cache line space.
+/// Use this to ensure structures don't share cache lines.
+///
+/// Example:
+/// ```zig
+/// const MyStruct = struct {
+///     hot_data: u64,
+///     _padding: CacheLinePadding(8), // 8 = sizeof(hot_data)
+/// };
+/// ```
+pub fn CacheLinePadding(comptime used_bytes: usize) type {
+    const padding_size = if (used_bytes >= cache_line) 0 else cache_line - used_bytes;
+    return [padding_size]u8;
+}
+
+/// Compile-time assertion that a type is exactly cache-line sized.
+pub fn assertCacheLineAligned(comptime T: type) void {
+    if (@sizeOf(T) != cache_line) {
+        @compileError(std.fmt.comptimePrint(
+            "Type {} has size {} but expected cache line size {}",
+            .{ @typeName(T), @sizeOf(T), cache_line },
+        ));
+    }
+}
+
+// ============================================================================
+// Timestamp and file utilities
+// ============================================================================
 
 /// Format a timestamped results path using the given prefix and a fixed
 /// `YYYYMMDD_HHMMSS` suffix derived from `std.time.timestamp()`.
@@ -129,4 +174,21 @@ pub fn fmtF64Commas2(buf: *[48]u8, val: f64) []const u8 {
     o += 1;
     @memcpy(buf[0..o], out[0..o]);
     return buf[0..o];
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "cache_line is reasonable" {
+    try std.testing.expect(cache_line >= 64);
+    try std.testing.expect(cache_line <= 256);
+}
+
+test "CacheLinePadding produces correct size" {
+    const Padded = struct {
+        value: u64,
+        _padding: CacheLinePadding(@sizeOf(u64)),
+    };
+    try std.testing.expectEqual(cache_line, @sizeOf(Padded));
 }
