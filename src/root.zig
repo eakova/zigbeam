@@ -2,21 +2,21 @@
 //! By importing this file, consumers (and internal tools like benchmarks)
 //! gain access to the entire surface area via a single namespace.
 
-const tagged_pointer = @import("beam-tagged-pointer");
-const thread_local_cache = @import("beam-thread-local-cache");
-const arc = @import("beam-arc");
-const arc_pool = @import("beam-arc-pool");
-const arc_cycle_detector = @import("beam-arc-cycle-detector");
-const backoff = @import("beam-backoff");
-const dvyukov_mpmc_queue = @import("beam-dvyukov-mpmc");
-const sharded_dvyukov_mpmc_queue = @import("beam-sharded-dvyukov-mpmc");
-const beam_deque = @import("beam-deque");
-const beam_deque_channel = @import("beam-deque-channel");
+const tagged_pointer = @import("tagged-pointer");
+const thread_local_cache = @import("thread-local-cache");
+const arc = @import("arc");
+const arc_pool = @import("arc-pool");
+const arc_cycle_detector = @import("arc-cycle");
+const backoff = @import("backoff");
+const dvyukov_mpmc_queue = @import("dvyukov-mpmc");
+const sharded_dvyukov_mpmc_queue = @import("sharded-dvyukov-mpmc");
+const deque = @import("deque");
+const deque_channel = @import("deque-channel");
 const spsc_queue = @import("spsc-queue");
-const segmented_queue = @import("beam-segmented-queue");
-const beam_task = @import("beam-task");
-const cache_padded = @import("beam-cache-padded");
-const ebr = @import("beam-ebr");
+const segmented_queue = @import("segmented-queue");
+const task = @import("task");
+const cache_padded = @import("cache-padded");
+const ebr = @import("ebr");
 
 // Public entry under a single namespace. Consumers use:
 // const beam = @import("zigbeam");
@@ -40,8 +40,8 @@ pub const Libs = struct {
     pub const ShardedDVyukovMPMCQueue = sharded_dvyukov_mpmc_queue.ShardedDVyukovMPMCQueue;
 
     // Deque - High-Performance Work-Stealing
-    pub const Deque = beam_deque.Deque;
-    pub const DequeChannel = beam_deque_channel.DequeChannel;
+    pub const Deque = deque.Deque;
+    pub const DequeChannel = deque_channel.DequeChannel;
 
     // Bounded SPSC Queue - Lock-Free Point-to-Point Communication
     pub const BoundedSPSCQueue = spsc_queue.BoundedSPSCQueue;
@@ -50,7 +50,7 @@ pub const Libs = struct {
     pub const SegmentedQueue = segmented_queue.SegmentedQueue;
 
     // Task - Cancellable OS-thread task abstraction
-    pub const Task = beam_task.Task;
+    pub const Task = task.Task;
 
     // CachePadded - Cache-line aware padding helpers
     pub const CachePadded = cache_padded.CachePadded;
