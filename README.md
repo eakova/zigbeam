@@ -21,6 +21,7 @@ This repository hosts multiple Zig libraries under one roof. Each library can be
 - Source: [src/loom/loom.zig](src/loom/loom.zig)
 - Tests: `zig build test-loom`
 - Docs: [src/loom/README.md](src/loom/README.md)
+- FAQ: [src/loom/docs/FAQ.md](src/loom/docs/FAQ.md)
 
 ---
 

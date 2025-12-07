@@ -1,6 +1,28 @@
 # Loom
 
-High-performance work-stealing thread pool with structured concurrency for building parallel applications in Zig.
+**Loom is a data-parallelism framework for Zig.** It is lightweight and makes it easy to convert sequential loops into parallel pipelines. Its structured APIs and lock-free internals enable safe, efficient multi-core utilization.
+
+## Why Loom?
+
+- **Minimal code changes** — Replace `for` with `par_iter()`, done
+- **Lock-free internals** — Work-stealing deques with ~5-10ns spawn latency
+- **Structured concurrency** — Scoped spawning ensures tasks complete before scope exits
+- **Composable API** — Chain `.map()`, `.filter()`, `.reduce()` like functional pipelines
+- **Automatic load balancing** — Idle threads steal work from busy ones
+- **Zero external dependencies** — Pure Zig, built on beam primitives
+
+### From Sequential to Parallel
+
+```zig
+// Before:
+var sum: i64 = 0;
+for (data) |x| sum += x;
+
+// After:
+const sum = loom.par_iter(data).reduce(Reducer(i64).sum());
+```
+
+Same result. All cores utilized. No manual thread management.
 
 ## Overview
 
@@ -273,6 +295,7 @@ zig build samples-loom
 
 ## See Also
 
+- [FAQ.md](docs/FAQ.md) - Common questions and answers
 - [LOOM_IMPLEMENTATION.md](docs/LOOM_IMPLEMENTATION.md) - Architecture and design
 - [loom_api_showcase.zig](samples/loom_api_showcase.zig) - Comprehensive API examples
 
